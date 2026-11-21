@@ -15,10 +15,13 @@
 
 - **Sicherheits- & Integritäts-Fixes (2.1.1)**:
   - **Papierkorb (`src/recycle_bin.cpp`)**: `SHEmptyRecycleBinW()` wird nur noch ausgeführt, wenn alle Papierkorb-Objekte ohne Fehler und ohne Abbruch sicher überschrieben wurden.
+  - **Papierkorb-Endzustand (`src/recycle_bin.cpp`)**: Fehler bei Aufzählung, `exists`, der Windows-API und der abschließenden `SHQueryRecycleBinW()`-Verifikation werden fail-closed behandelt; Erfolg wird nur bei bestätigtem leerem Endzustand gemeldet.
   - **Freispeicher-Bereinigung (`src/wipe_free_space.cpp`)**: Rückgabewerte von `try_fill_secure_random()` und `FlushFileBuffers()` werden konsequent fail-closed geprüft.
   - **Audit-Kettenprüfung (`src/audit_integrity.cpp`, `src/cli_main.cpp`)**: Neues `verify_audit_chain()` prüft zusätzlich zu `verify_audit_file()` die lückenlose Kette aller `.hmac`-Sidecars bis `chain.head`.
+  - **Audit- und Zertifikatseingaben (`src/audit_integrity.cpp`, `src/certificate.cpp`)**: Größenlimits und HTML-Escaping schützen die Prüf- und Exportpfade vor Ressourcenerschöpfung und eingebettetem aktivem HTML.
   - **Zertifikate (`src/certificate.cpp`)**: Wortlaut auf *„Technischer Datenvernichtungs- und Auditbericht“* präzisiert und Einzel-HMAC vs. vollständige Kettenprüfung getrennt ausgewiesen.
   - **Device Sanitize (`src/device_main.cpp`)**: Audit unterscheidet klar zwischen angenommenem Windows-Storage-Stack-IOCTL (`ApiRequestAccepted`, `CompletionScope`) und fehlender unabhängiger physischer Controller-Verifikation (`IndependentPhysicalVerification: not_performed`).
+  - **Regressionstests**: CSPRNG- und Flush-Fehler, unvollständige Papierkorb-Aufzählungen, API-/Endzustandsfehler sowie manipulierte Audit-Ketten und Zertifikatseingaben sind automatisiert abgedeckt.
   - **Versionierung & Test-Doku**: Einheitlich auf Version `2.1.1` (`CMakeLists.txt`, `Oblivion.wxs`, `BUILD_MSI.bat`, `BUILD_WINDOWS.bat`, `AppxManifest.xml`) umgestellt; `tests/README.md` präzisiert die Rolle der optionalen `.ps1`-Hilfsskripte.
 
 ## 2.1.0 – Enterprise & Modern Windows Features
