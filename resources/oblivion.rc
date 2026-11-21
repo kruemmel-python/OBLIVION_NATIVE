@@ -1,0 +1,10 @@
+#include "../include/oblivion/resource_ids.h"
+
+IDI_OBLIVION_CONTEXT ICON "icons/context.ico"
+IDI_OBLIVION_ANALYZE ICON "icons/analyze.ico"
+IDI_OBLIVION_WARNING ICON "icons/warning.ico"
+IDI_OBLIVION_PROGRESS ICON "icons/progress.ico"
+IDI_OBLIVION_SETTINGS ICON "icons/settings.ico"
+IDI_OBLIVION_RESULT ICON "icons/result.ico"
+
+1 24 "oblivion.manifest"

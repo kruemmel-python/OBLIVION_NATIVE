@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  revision="1.0" schemaVersion="1.0"
+  xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <policyNamespaces>
+    <target prefix="oblivion" namespace="Oblivion.Policies" />
+    <using prefix="windows" namespace="Microsoft.Policies.Windows" />
+  </policyNamespaces>
+  <resources minRequiredRevision="1.0" />
+  <categories>
+    <category name="OblivionCategory" displayName="$(string.OblivionCategory)" />
+  </categories>
+  <policies>
+    <policy name="Policy_DefaultEraseMode" class="Both" displayName="$(string.Policy_DefaultEraseMode)"
+      explainText="$(string.Policy_DefaultEraseMode_Help)"
+      key="Software\Policies\Oblivion" valueName="EraseMode">
+      <parentCategory ref="OblivionCategory" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <enum id="SelectEraseMode" valueName="EraseMode">
+          <item displayName="$(string.Mode_Fast)">
+            <value><decimal value="0" /></value>
+          </item>
+          <item displayName="$(string.Mode_Standard)">
+            <value><decimal value="1" /></value>
+          </item>
+          <item displayName="$(string.Mode_Strong)">
+            <value><decimal value="2" /></value>
+          </item>
+          <item displayName="$(string.Mode_DoD)">
+            <value><decimal value="3" /></value>
+          </item>
+          <item displayName="$(string.Mode_NIST)">
+            <value><decimal value="4" /></value>
+          </item>
+          <item displayName="$(string.Mode_BSI)">
+            <value><decimal value="5" /></value>
+          </item>
+          <item displayName="$(string.Mode_Gutmann)">
+            <value><decimal value="6" /></value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+
+    <policy name="Policy_EnforceVerification" class="Both" displayName="$(string.Policy_EnforceVerification)"
+      explainText="$(string.Policy_EnforceVerification_Help)"
+      key="Software\Policies\Oblivion" valueName="EnforceVerification">
+      <parentCategory ref="OblivionCategory" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+
+    <policy name="Policy_DisallowSharedHardlinkOverwrite" class="Both" displayName="$(string.Policy_DisallowSharedHardlinkOverwrite)"
+      explainText="$(string.Policy_DisallowSharedHardlinkOverwrite_Help)"
+      key="Software\Policies\Oblivion" valueName="DisallowSharedHardlinkOverwrite">
+      <parentCategory ref="OblivionCategory" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+  </policies>
+</policyDefinitions>

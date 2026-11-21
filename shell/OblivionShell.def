@@ -1,0 +1,4 @@
+LIBRARY "OblivionShell"
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE

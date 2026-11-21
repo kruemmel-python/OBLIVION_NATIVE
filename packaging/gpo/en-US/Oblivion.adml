@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  revision="1.0" schemaVersion="1.0"
+  xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <displayName>OBLIVION Group Policy</displayName>
+  <description>Administrative Templates for OBLIVION Native</description>
+  <resources>
+    <stringTable>
+      <string id="OblivionCategory">OBLIVION Secure Deletion</string>
+      <string id="Policy_DefaultEraseMode">Enforce Default Erase Mode</string>
+      <string id="Policy_DefaultEraseMode_Help">Enforces the selected wiping profile (e.g. DoD 5220.22-M, NIST SP 800-88, or STRONG) for all system users.</string>
+      <string id="Mode_Fast">FAST (1 Pass Random)</string>
+      <string id="Mode_Standard">STANDARD (Random + Zero)</string>
+      <string id="Mode_Strong">STRONG (Random + Zero + Random)</string>
+      <string id="Mode_DoD">DoD 5220.22-M (Zero + Ones + Random)</string>
+      <string id="Mode_NIST">NIST SP 800-88 Rev. 1 Clear</string>
+      <string id="Mode_BSI">BSI IT-Grundschutz</string>
+      <string id="Mode_Gutmann">Gutmann (35 Passes)</string>
+      <string id="Policy_EnforceVerification">Enforce Readback Verification</string>
+      <string id="Policy_EnforceVerification_Help">Prevents users from disabling SHA-256 and byte readback verification on final pass.</string>
+      <string id="Policy_DisallowSharedHardlinkOverwrite">Permanently Disallow Shared Hardlink Overwrite</string>
+      <string id="Policy_DisallowSharedHardlinkOverwrite_Help">Disables the dangerous 'Shared Content Overwrite' hardlink policy across the organization.</string>
+    </stringTable>
+  </resources>
+</policyDefinitionResources>

@@ -1,0 +1,17 @@
+# CMake / Visual Studio build output
+/build/
+/.vs/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+
+# Locally generated release artifacts
+/dist/
+/OBLIVION_NATIVE.zip
+
+# User- and tool-specific files
+*.user
+*.suo
+*.VC.db
+*.VC.opendb

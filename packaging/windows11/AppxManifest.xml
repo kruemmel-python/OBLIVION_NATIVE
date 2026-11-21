@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  IgnorableNamespaces="uap rescap desktop desktop4 desktop5 uap10 com">
+
+  <Identity
+    Name="OblivionNative.ShellExtension"
+    ProcessorArchitecture="x64"
+    Publisher="CN=OblivionSecurity"
+    Version="2.1.1.0" />
+
+  <Properties>
+    <DisplayName>Oblivion Native</DisplayName>
+    <PublisherDisplayName>Oblivion Security</PublisherDisplayName>
+    <Logo>StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="Oblivion" Executable="Oblivion.exe" uap10:TrustLevel="mediumIL" uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Oblivion Native"
+        Description="Sichere C++20/Win32 Dateivernichtung und Datenanalyse"
+        BackgroundColor="transparent"
+        Square150x150Logo="Square150x150Logo.png"
+        Square44x44Logo="Square44x44Logo.png" />
+      <Extensions>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="OblivionErase" Clsid="B7BC56B2-689F-4E78-9A59-63F18011E6B0" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="OblivionEraseDir" Clsid="B7BC56B2-689F-4E78-9A59-63F18011E6B0" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="Oblivion Shell Extension">
+              <com:Class Id="B7BC56B2-689F-4E78-9A59-63F18011E6B0" Path="OblivionShell.dll" ThreadingModel="STA"/>
+              <com:Class Id="A54E1B58-55DD-4A99-99F7-2D2EE2BA1241" Path="OblivionShell.dll" ThreadingModel="STA"/>
+              <com:Class Id="4F3CBF3C-1A66-4650-9C24-E19227C05872" Path="OblivionShell.dll" ThreadingModel="STA"/>
+              <com:Class Id="8F2D6123-EF72-4A6D-BD22-EC042C5D3DF1" Path="OblivionShell.dll" ThreadingModel="STA"/>
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

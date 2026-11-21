@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  revision="1.0" schemaVersion="1.0"
+  xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <displayName>OBLIVION Gruppenrichtlinien</displayName>
+  <description>Konfigurationsvorlagen fuer OBLIVION Native</description>
+  <resources>
+    <stringTable>
+      <string id="OblivionCategory">OBLIVION Sicherheitsloeschung</string>
+      <string id="Policy_DefaultEraseMode">Standard-Loeschmodus erzwingen</string>
+      <string id="Policy_DefaultEraseMode_Help">Erzwingt das vorgegebene Ueberschreibungsprofil (z. B. DoD 5220.22-M, NIST SP 800-88 oder STRONG) fuer alle Benutzer.</string>
+      <string id="Mode_Fast">FAST (1 Pass Random)</string>
+      <string id="Mode_Standard">STANDARD (Random + Zero)</string>
+      <string id="Mode_Strong">STRONG (Random + Zero + Random)</string>
+      <string id="Mode_DoD">DoD 5220.22-M (Zero + Ones + Random)</string>
+      <string id="Mode_NIST">NIST SP 800-88 Rev. 1 Clear</string>
+      <string id="Mode_BSI">BSI IT-Grundschutz</string>
+      <string id="Mode_Gutmann">Gutmann (35 Passes)</string>
+      <string id="Policy_EnforceVerification">Readback-Verifikation erzwingen</string>
+      <string id="Policy_EnforceVerification_Help">Verhindert, dass Benutzer die SHA-256- bzw. Byte-Verifikation des finalen Loeschpasses deaktivieren.</string>
+      <string id="Policy_DisallowSharedHardlinkOverwrite">Gemeinsames Ueberschreiben von Hardlinks dauerhaft sperren</string>
+      <string id="Policy_DisallowSharedHardlinkOverwrite_Help">Sperrt die gefaehrliche Option 'Shared Content Overwrite' fuer Hardlinks, um unbeabsichtigte Veraenderungen verknuepfter Dateien auszuschliessen.</string>
+    </stringTable>
+  </resources>
+</policyDefinitionResources>

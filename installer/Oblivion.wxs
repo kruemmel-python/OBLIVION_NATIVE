@@ -1,0 +1,150 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Oblivion Native"
+           Manufacturer="Oblivion Security"
+           Version="2.1.1"
+           UpgradeCode="4C7D0956-6BF2-4EC8-B541-AE696D6FD641"
+           Scope="perMachine"
+           Language="1031">
+
+    <MajorUpgrade DowngradeErrorMessage="Eine neuere Version von Oblivion ist bereits installiert." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="OblivionIcon" SourceFile="resources\icons\context.ico" />
+    <Property Id="ARPPRODUCTICON" Value="OblivionIcon" />
+    <Property Id="ARPCOMMENTS" Value="Sichere C++20/Win32 Dateivernichtung und Datenanalyse" />
+    <Property Id="ARPCONTACT" Value="Oblivion Security" />
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="installer\license.rtf" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Oblivion" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Oblivion" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="OblivionExeComponent" Guid="98F1D2C3-4E5F-6A7B-8C9D-0E1F2A3B4C5D">
+        <File Id="OblivionExe" Source="dist\Oblivion.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="OblivionCLIExtComponent" Guid="A1B2C3D4-E5F6-7A8B-9C0D-1E2F3A4B5C6D">
+        <File Id="OblivionCLIExe" Source="dist\OblivionCLI.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="OblivionDeviceComponent" Guid="B2C3D4E5-F6A7-8B9C-0D1E-2F3A4B5C6D7E">
+        <File Id="OblivionDeviceExe" Source="dist\OblivionDevice.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="OblivionReadmeComponent" Guid="C3D4E5F6-A7B8-9C0D-1E2F-3A4B5C6D7E8F">
+        <File Id="ReadmeMd" Source="dist\README.md" KeyPath="yes" />
+      </Component>
+
+      <!-- Start Menu Shortcuts -->
+      <Component Id="StartMenuShortcuts" Guid="D4E5F6A7-B8C9-0D1E-2F3A-4B5C6D7E8F90" Directory="ApplicationProgramsFolder">
+        <Shortcut Id="MainAppShortcut"
+                  Name="Oblivion Native"
+                  Description="Oblivion Kontrollzentrum für sichere Dateivernichtung und Analyse"
+                  Target="[#OblivionExe]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="OblivionIcon" />
+        <Shortcut Id="SettingsShortcut"
+                  Name="Oblivion - Einstellungen"
+                  Description="Oblivion Vernichtungsoptionen konfigurieren"
+                  Target="[#OblivionExe]"
+                  Arguments="--settings"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="OblivionIcon" />
+        <Shortcut Id="ReadmeShortcut"
+                  Name="Oblivion - Dokumentation"
+                  Description="OBLIVION Dokumentation und Sicherheitshinweise"
+                  Target="[#ReadmeMd]"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="CleanUpShortCutFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Oblivion\Install" Name="ShortcutsInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- Shell Context Menu for All Files (*) -->
+      <Component Id="ShellMenuFiles" Guid="E5F6A7B8-C90D-1E2F-3A4B-5C6D7E8F90A1">
+        <RegistryKey Root="HKCR" Key="*\shell\OblivionErase">
+          <RegistryValue Type="string" Value="Mit Oblivion sicher löschen" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Mit Oblivion sicher löschen" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-103" />
+          <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --shell-batch erase &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR" Key="*\shell\OblivionAnalyze">
+          <RegistryValue Type="string" Value="Mit Oblivion analysieren (Dry Run)" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Mit Oblivion analysieren (Dry Run)" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-102" />
+          <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --shell-batch analyze &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR" Key="*\shell\OblivionSettings">
+          <RegistryValue Type="string" Value="Oblivion: Optionen" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Oblivion: Optionen" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-105" />
+          <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --settings-singleton" />
+        </RegistryKey>
+        <RegistryValue Root="HKLM" Key="Software\Oblivion\Install" Name="ShellFilesInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- Shell Context Menu for Folders (Directory) -->
+      <Component Id="ShellMenuFolders" Guid="F6A7B8C9-0D1E-2F3A-4B5C-6D7E8F90A1B2">
+        <RegistryKey Root="HKCR" Key="Directory\shell\OblivionErase">
+          <RegistryValue Type="string" Value="Mit Oblivion sicher löschen" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Mit Oblivion sicher löschen" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-103" />
+          <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --shell-batch erase &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR" Key="Directory\shell\OblivionAnalyze">
+          <RegistryValue Type="string" Value="Mit Oblivion analysieren (Dry Run)" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Mit Oblivion analysieren (Dry Run)" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-102" />
+          <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --shell-batch analyze &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR" Key="Directory\shell\OblivionSettings">
+          <RegistryValue Type="string" Value="Oblivion: Optionen" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Oblivion: Optionen" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-105" />
+          <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --settings-singleton" />
+        </RegistryKey>
+        <RegistryValue Root="HKLM" Key="Software\Oblivion\Install" Name="ShellFoldersInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- Shell Context Menu for Recycle Bin -->
+      <Component Id="ShellMenuRecycleBin" Guid="0A1B2C3D-4E5F-6A7B-8C9D-0E1F2A3B4C5D">
+        <RegistryKey Root="HKCR" Key="CLSID\{645FF040-5081-101B-9F08-00AA002F954E}\shell\OblivionEmpty">
+          <RegistryValue Type="string" Value="Papierkorb mit Oblivion sicher leeren" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Papierkorb mit Oblivion sicher leeren" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-103" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --empty-recycle-bin" />
+        </RegistryKey>
+        <RegistryValue Root="HKLM" Key="Software\Oblivion\Install" Name="ShellRecycleBinInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- Shell Context Menu for Drives (Wipe Free Space) -->
+      <Component Id="ShellMenuDrives" Guid="1B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E">
+        <RegistryKey Root="HKCR" Key="Drive\shell\OblivionWipeFree">
+          <RegistryValue Type="string" Value="Freien Speicherplatz mit Oblivion überschreiben" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Freien Speicherplatz mit Oblivion überschreiben" />
+          <RegistryValue Name="Icon" Type="string" Value="&quot;[#OblivionExe]&quot;,-103" />
+          <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
+          <RegistryValue Key="command" Type="string" Value="&quot;[#OblivionExe]&quot; --wipe-free-space &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryValue Root="HKLM" Key="Software\Oblivion\Install" Name="ShellDrivesInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="MainFeature" Title="Oblivion Native" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+  </Package>
+</Wix>
