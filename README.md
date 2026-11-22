@@ -1,4 +1,4 @@
-# OBLIVION Native 2.1.2
+# OBLIVION Native 2.1.4
 
 Native C++20/Win32-Neuentwicklung des OBLIVION-Löschwerkzeugs mit vollständigem Desktop-Kontrollzentrum, Explorer-Integration, Compliance-Presets, Audit-Zertifikaten und separater Device-Sanitize-Domäne.
 
@@ -8,7 +8,7 @@ Nach dem Build:
 
 - `Oblivion.exe` – natives Windows-GUI-Kontrollzentrum (ohne Konsolenfenster; über `--gui` oder ohne Parameter) sowie Shell-Batch-Host
 - `OblivionCLI.exe` – CLI/Dry-Run/JSON-Ausgabe/erweiterte Optionen
-- `OblivionShell.dll` – Kompatibilitätsartefakt für Windows-11-Sparse-Package-Tests; im Standard-Explorer-Pfad werden direkte statische Shell-Verbs genutzt
+- `OblivionShell.dll` – `IExplorerCommand`-Erweiterung für das moderne Windows-11-Untermenü; direkte statische Top-Level-Verbs bleiben als klassischer Fallback (auch für Third-Party-Shells wie Nilesoft Shell) erhalten
 - `OblivionDevice.exe` – getrennte, stark abgesicherte Device-Sanitize-Domäne
 
 GUI und CLI verwenden dieselbe C++-Engine (`oblivion_core`).
@@ -16,8 +16,8 @@ GUI und CLI verwenden dieselbe C++-Engine (`oblivion_core`).
 ## Implementiert
 
 - **GUI-Kontrollzentrum (`Oblivion.exe`)** mit Drag & Drop, Datei-/Ordner-Auswahl, Dry-Run-Analyse, sicherem Löschen, Papierkorb-Leerung, Laufwerks-Freispeicher-Bereinigung, Einstellungsprofil-Anzeige, HTML-Zertifikat-Export, Systemdiagnose und Kontextmenü-Verwaltung
-- **Direkte Explorer-Kontextmenüeinträge** (kompatibel mit Standard-Explorer und Third-Party-Shells wie Nilesoft Shell):
-  - Dateien & Ordner (`*` / `Directory`): **Mit Oblivion sicher löschen**, **Mit Oblivion analysieren (Dry Run)**, **Oblivion: Optionen**
+- **Explorer-Kontextmenüintegration**:
+  - Dateien & Ordner (`*` / `Directory`): modernes Windows-11-Untermenü **Oblivion** (`OblivionShell.dll`) sowie direkte statische Top-Level-Verbs (**Mit Oblivion sicher löschen**, **Mit Oblivion analysieren (Dry Run)**, **Oblivion Optionen**)
   - Laufwerke (`Drive`): **Freien Speicherplatz mit Oblivion überschreiben**
   - Papierkorb (`CLSID\{645FF040-5081-101B-9F08-00AA002F954E}`): **Papierkorb mit Oblivion sicher leeren**
 - Mehrfachauswahl über statische Windows-Shell-Verbs + nativen In-Memory-Batch-Broker in `Oblivion.exe`
@@ -221,7 +221,13 @@ dist\OblivionDevice.exe
 dist\OblivionShell.dll
 ```
 
-Die aktuelle Windows-11-Shellintegration registriert keine OBLIVION-COM-DLL. `OblivionShell.dll` bleibt nur als Kompatibilitätsartefakt im Build und wird von Explorer nicht benötigt.
+Das moderne Windows-11-Kontextmenü wird über die vorhandene
+`IExplorerCommand`-DLL und eine Sparse-Paketidentität registriert. Der
+klassische Explorer-Pfad (sowie Third-Party-Shells wie Nilesoft Shell) nutzt
+zusätzlich direkte statische Top-Level-Verbs. Für die
+lose, unsignierte Sparse-Paketregistrierung muss der Windows-Entwicklermodus
+aktiv sein; für eine breite öffentliche Verteilung ist ein signiertes
+Identitätspaket erforderlich.
 
 ## Installation
 
@@ -233,11 +239,11 @@ Erstellt ein vollständiges Windows-Setup (`.msi`) mit grafischem Installationsa
 .\BUILD_MSI.bat
 ```
 
-Ergebnis: `dist\OblivionSetup-2.1.2.msi`
+Ergebnis: `dist\OblivionSetup-2.1.4.msi`
 
 ### Variante B: Portables Kontextmenü (Benutzerebene)
 
-Direkte Registrierung der kompilierten Binaries für den aktuellen Benutzer ohne MSI:
+Registrierung eines OBLIVION-Untermenüs für den aktuellen Benutzer ohne MSI:
 
 Portable Installationen in benutzerbeschreibbaren Verzeichnissen werden aus
 Sicherheitsgründen nicht automatisch per UAC neu gestartet. Für den
@@ -248,7 +254,7 @@ erforderlich.
 .\INSTALL_CONTEXT_MENU.bat
 ```
 
-Entfernen:
+Entfernen (inkl. automatischer UAC-Abfrage, falls systemweite MSI-Einträge unter `HKLM` vorliegen):
 
 ```powershell
 .\REMOVE_CONTEXT_MENU.bat

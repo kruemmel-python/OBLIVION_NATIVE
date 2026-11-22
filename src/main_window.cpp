@@ -635,7 +635,7 @@ LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) noexcept try {
       SendMessageW(s->icon_ctrl, STM_SETICON, reinterpret_cast<WPARAM>(hi), 0);
     }
 
-    s->title_lbl = make_label(h, L"Oblivion Native 2.1.2", 72, 14, 420, 26,
+    s->title_lbl = make_label(h, L"Oblivion Native 2.1.4", 72, 14, 420, 26,
                               s->font_title, dark);
     s->subtitle_lbl = make_label(
         h, L"Sichere Dateivernichtung, Datenträgeranalyse && Compliance", 72, 42,
@@ -860,7 +860,7 @@ int show_main_window() {
   main_state state{};
   HWND hwnd = CreateWindowExW(
       WS_EX_APPWINDOW | WS_EX_ACCEPTFILES, CLASS_NAME,
-      L"Oblivion Native 2.1.2 – Sichere Dateivernichtung",
+      L"Oblivion Native 2.1.4 – Sichere Dateivernichtung",
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, pos_x, pos_y,
       width, height, nullptr, nullptr, GetModuleHandleW(nullptr), &state);
   if (!hwnd)

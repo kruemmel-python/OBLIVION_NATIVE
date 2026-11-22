@@ -29,7 +29,7 @@ std::filesystem::path exe() {
 
 void usage() {
   std::wcout
-      << L"OBLIVION Native CLI 2.1.2\n"
+      << L"OBLIVION Native CLI 2.1.4\n"
       << L"Aufruf: OblivionCLI.exe [Optionen] <Pfad...>\n\n"
       << L"Löschmodi:\n"
       << L"  --fast                     1 Pass Random (ohne Readback)\n"
@@ -328,13 +328,15 @@ int wmain(int argc, wchar_t *argv[]) try {
     return r.success ? 0 : 1;
   }
 
-  if (std::wstring_view{argv[1]} == L"--uninstall-shell") {
+  if (std::wstring_view{argv[1]} == L"--uninstall-shell" ||
+      std::wstring_view{argv[1]} == L"--uninstall-shell-quiet") {
     if (argc != 2) {
-      std::wcerr << L"--uninstall-shell akzeptiert keine weiteren Argumente.\n";
+      std::wcerr << argv[1] << L" akzeptiert keine weiteren Argumente.\n";
       return 1;
     }
     auto r = uninstall_context_menu();
-    std::wcout << r.message << L"\n";
+    if (std::wstring_view{argv[1]} == L"--uninstall-shell")
+      std::wcout << r.message << L"\n";
     return r.success ? 0 : 1;
   }
 

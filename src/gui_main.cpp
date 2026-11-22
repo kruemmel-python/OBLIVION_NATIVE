@@ -177,9 +177,12 @@ int WINAPI wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ PWSTR,
     LocalFree(argv);
     return r.success ? 0 : 1;
   }
-  if (first == L"--uninstall-shell") {
+  if (first == L"--uninstall-shell" || first == L"--uninstall-shell-quiet") {
     auto r = uninstall_context_menu();
-    MessageBoxW(nullptr, r.message.c_str(), L"Oblivion", MB_OK);
+    if (first == L"--uninstall-shell") {
+      MessageBoxW(nullptr, r.message.c_str(), L"Oblivion",
+                  MB_OK | (r.success ? MB_ICONINFORMATION : MB_ICONERROR));
+    }
     LocalFree(argv);
     return r.success ? 0 : 1;
   }

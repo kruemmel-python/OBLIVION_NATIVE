@@ -366,7 +366,7 @@ bool generate_certificate_from_audit(
       << "      </table>\n"
       << "    </div>\n"
       << "    <div class=\"footer\">\n"
-      << "      Erstellt mit OBLIVION Native 2.1.2 &bull; Lokale C++20/Win32-Sicherheitsarchitektur ohne externe Serverabhängigkeit &bull; Lokaler technischer Audit-Nachweis (kein amtliches Gutachten)\n"
+      << "      Erstellt mit OBLIVION Native 2.1.4 &bull; Lokale C++20/Win32-Sicherheitsarchitektur ohne externe Serverabhängigkeit &bull; Lokaler technischer Audit-Nachweis (kein amtliches Gutachten)\n"
       << "    </div>\n"
       << "  </div>\n"
       << "</body>\n"

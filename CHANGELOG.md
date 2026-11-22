@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.1.4 – Modernes Windows-11-Kontextmenü & Shell-Kompatibilität
+
+- Der Installer liefert die vorhandene `IExplorerCommand`-Erweiterung samt
+  Sparse-Paketmanifest und Assets aus und registriert sie für das moderne
+  Windows-11-Kontextmenü.
+- Die Paketregistrierung erkennt veraltete oder auf einen anderen Buildpfad
+  verweisende Registrierungen und verifiziert den Endzustand.
+- Als klassischer Explorer-Fallback (inkl. Third-Party-Shells wie Nilesoft
+  Shell) werden wieder direkte statische Top-Level-Verbs (`OblivionErase`,
+  `OblivionAnalyze`, `OblivionSettings`) registriert.
+- Beim Entfernen des Kontextmenüs über UI/CLI (`--uninstall-shell`) werden
+  systemweite MSI-Einträge (`HKLM`) bei Bedarf automatisch per UAC-Abfrage
+  (`--uninstall-shell-quiet`) mitbereinigt.
+
+## 2.1.3 – Explorer-Untermenü und Installationsbereinigung
+
+- Die portable UI-Integration und der MSI registrieren Datei- und
+  Ordneraktionen wieder gemeinsam im statischen Untermenü **Oblivion** statt
+  als drei direkte Explorer-Einträge.
+- Der MSI entfernt beim Upgrade die direkten 2.1.2-Verben, bevor das neue
+  Untermenü angelegt wird.
+- Beim Entfernen über die UI wird jetzt ausdrücklich gemeldet, wenn
+  systemweite, vom MSI verwaltete Einträge bestehen bleiben.
+
 ## 2.1.2 – Security Hardening
 
 - Dateilöschung, Reparse-Entfernung und Metadaten-Rename sind an das geöffnete

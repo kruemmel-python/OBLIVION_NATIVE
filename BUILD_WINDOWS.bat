@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 echo ============================================================
-echo  OBLIVION NATIVE 2.1.2 - WINDOWS BUILD
+echo  OBLIVION NATIVE 2.1.4 - WINDOWS BUILD
 echo  C++20 / Win32 / Static Shell / Native Batch / BCrypt / WMI / RM
 echo ============================================================
 set "CMAKE_EXE="
@@ -39,6 +39,7 @@ if exist dist (echo [ERROR] dist konnte nicht entfernt werden.& exit /b 1)
 mkdir dist
 for %%F in (Oblivion.exe OblivionCLI.exe OblivionDevice.exe OblivionShell.dll) do (copy /y "build\Release\%%F" "dist\%%F" >nul || exit /b 1)
 copy /y README.md dist\README.md >nul || exit /b 1
+for %%F in (AppxManifest.xml StoreLogo.png Square44x44Logo.png Square150x150Logo.png Register-Win11ContextMenu.ps1 Unregister-Win11ContextMenu.ps1) do (copy /y "packaging\windows11\%%F" "dist\%%F" >nul || exit /b 1)
 echo.
 echo [OK] Build erfolgreich: %CD%\dist
 endlocal

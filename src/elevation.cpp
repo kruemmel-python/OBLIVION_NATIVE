@@ -167,8 +167,10 @@ bool is_process_elevated() {
          elevation.TokenIsElevated != 0;
 }
 
-bool relaunch_elevated(const std::filesystem::path &executable,
-                       const std::vector<std::wstring> &arguments) try {
+bool relaunch_elevated_impl(const std::filesystem::path &executable,
+                            const std::vector<std::wstring> &arguments,
+                            const bool wait_for_exit,
+                            unsigned long *exit_code) try {
   if (executable.empty())
     return false;
   std::vector<unique_win_handle> directory_locks;
@@ -196,12 +198,36 @@ bool relaunch_elevated(const std::filesystem::path &executable,
   info.lpVerb = L"runas";
   info.lpFile = executable.c_str();
   info.lpParameters = parameters.c_str();
-  info.nShow = SW_SHOWNORMAL;
+  info.nShow = wait_for_exit ? SW_HIDE : SW_SHOWNORMAL;
   const bool launched = ShellExecuteExW(&info) != FALSE;
   unique_win_handle process{info.hProcess};
-  return launched;
+  if (!launched)
+    return false;
+  if (!wait_for_exit)
+    return true;
+  if (!process)
+    return false;
+  if (WaitForSingleObject(process.get(), 60000) != WAIT_OBJECT_0)
+    return false;
+  DWORD code = 1;
+  if (GetExitCodeProcess(process.get(), &code) == FALSE)
+    return false;
+  if (exit_code)
+    *exit_code = code;
+  return true;
 } catch (...) {
   return false;
+}
+
+bool relaunch_elevated(const std::filesystem::path &executable,
+                       const std::vector<std::wstring> &arguments) {
+  return relaunch_elevated_impl(executable, arguments, false, nullptr);
+}
+
+bool relaunch_elevated_and_wait(const std::filesystem::path &executable,
+                                const std::vector<std::wstring> &arguments,
+                                unsigned long &exit_code) {
+  return relaunch_elevated_impl(executable, arguments, true, &exit_code);
 }
 
 } // namespace oblivion

@@ -2,7 +2,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="Oblivion Native"
            Manufacturer="Oblivion Security"
-           Version="2.1.2"
+           Version="2.1.4"
            UpgradeCode="4C7D0956-6BF2-4EC8-B541-AE696D6FD641"
            Scope="perMachine"
            Language="1031">
@@ -39,6 +39,19 @@
         <File Id="OblivionDeviceExe" Source="dist\OblivionDevice.exe" KeyPath="yes" />
       </Component>
 
+      <Component Id="OblivionShellComponent" Guid="C74B6D8A-5A01-4F7B-97C9-DA091917C3E4">
+        <File Id="OblivionShellDll" Source="dist\OblivionShell.dll" KeyPath="yes" />
+      </Component>
+
+      <Component Id="Win11ShellPackageComponent" Guid="889D6C70-673B-44C4-AF43-4CE0898AF62A">
+        <File Id="Win11AppxManifest" Source="dist\AppxManifest.xml" KeyPath="yes" />
+        <File Id="Win11StoreLogo" Source="dist\StoreLogo.png" />
+        <File Id="Win11Square44Logo" Source="dist\Square44x44Logo.png" />
+        <File Id="Win11Square150Logo" Source="dist\Square150x150Logo.png" />
+        <File Id="Win11RegisterScript" Source="dist\Register-Win11ContextMenu.ps1" />
+        <File Id="Win11UnregisterScript" Source="dist\Unregister-Win11ContextMenu.ps1" />
+      </Component>
+
       <Component Id="OblivionReadmeComponent" Guid="C3D4E5F6-A7B8-9C0D-1E2F-3A4B5C6D7E8F">
         <File Id="ReadmeMd" Source="dist\README.md" KeyPath="yes" />
       </Component>
@@ -69,6 +82,7 @@
 
       <!-- Shell Context Menu for All Files (*) -->
       <Component Id="ShellMenuFiles" Guid="E5F6A7B8-C90D-1E2F-3A4B-5C6D7E8F90A1">
+        <RemoveRegistryKey Root="HKCR" Key="*\shell\Oblivion" Action="removeOnInstall" />
         <RegistryKey Root="HKCR" Key="*\shell\OblivionErase">
           <RegistryValue Type="string" Value="Mit Oblivion sicher löschen" />
           <RegistryValue Name="MUIVerb" Type="string" Value="Mit Oblivion sicher löschen" />
@@ -84,8 +98,8 @@
           <RegistryValue Key="command" Type="string" Value="&quot;[INSTALLFOLDER]Oblivion.exe&quot; --shell-batch analyze &quot;%1&quot;" />
         </RegistryKey>
         <RegistryKey Root="HKCR" Key="*\shell\OblivionSettings">
-          <RegistryValue Type="string" Value="Oblivion: Optionen" />
-          <RegistryValue Name="MUIVerb" Type="string" Value="Oblivion: Optionen" />
+          <RegistryValue Type="string" Value="Oblivion Optionen" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Oblivion Optionen" />
           <RegistryValue Name="Icon" Type="string" Value="&quot;[INSTALLFOLDER]Oblivion.exe&quot;,-105" />
           <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
           <RegistryValue Key="command" Type="string" Value="&quot;[INSTALLFOLDER]Oblivion.exe&quot; --settings-singleton" />
@@ -95,6 +109,7 @@
 
       <!-- Shell Context Menu for Folders (Directory) -->
       <Component Id="ShellMenuFolders" Guid="F6A7B8C9-0D1E-2F3A-4B5C-6D7E8F90A1B2">
+        <RemoveRegistryKey Root="HKCR" Key="Directory\shell\Oblivion" Action="removeOnInstall" />
         <RegistryKey Root="HKCR" Key="Directory\shell\OblivionErase">
           <RegistryValue Type="string" Value="Mit Oblivion sicher löschen" />
           <RegistryValue Name="MUIVerb" Type="string" Value="Mit Oblivion sicher löschen" />
@@ -110,8 +125,8 @@
           <RegistryValue Key="command" Type="string" Value="&quot;[INSTALLFOLDER]Oblivion.exe&quot; --shell-batch analyze &quot;%1&quot;" />
         </RegistryKey>
         <RegistryKey Root="HKCR" Key="Directory\shell\OblivionSettings">
-          <RegistryValue Type="string" Value="Oblivion: Optionen" />
-          <RegistryValue Name="MUIVerb" Type="string" Value="Oblivion: Optionen" />
+          <RegistryValue Type="string" Value="Oblivion Optionen" />
+          <RegistryValue Name="MUIVerb" Type="string" Value="Oblivion Optionen" />
           <RegistryValue Name="Icon" Type="string" Value="&quot;[INSTALLFOLDER]Oblivion.exe&quot;,-105" />
           <RegistryValue Name="MultiSelectModel" Type="string" Value="Player" />
           <RegistryValue Key="command" Type="string" Value="&quot;[INSTALLFOLDER]Oblivion.exe&quot; --settings-singleton" />
@@ -146,5 +161,23 @@
     <Feature Id="MainFeature" Title="Oblivion Native" Level="1">
       <ComponentGroupRef Id="ProductComponents" />
     </Feature>
+
+    <CustomAction Id="RegisterWin11ContextMenu"
+                  Directory="SystemFolder"
+                  ExeCommand="&quot;WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]Register-Win11ContextMenu.ps1&quot; -Manifest &quot;[INSTALLFOLDER]AppxManifest.xml&quot; -ExternalLocation &quot;[INSTALLFOLDER]&quot;"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+    <CustomAction Id="UnregisterWin11ContextMenu"
+                  Directory="SystemFolder"
+                  ExeCommand="&quot;WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]Unregister-Win11ContextMenu.ps1&quot;"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RegisterWin11ContextMenu" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="UnregisterWin11ContextMenu" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
   </Package>
 </Wix>

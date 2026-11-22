@@ -31,7 +31,7 @@ Aktueller Entwicklungsstand auf Basis von `OBLIVION_NATIVE` (C++20 / Win32 / CMa
 - [x] FAST / STANDARD / STRONG sowie Compliance-Presets (`DoD 5220.22-M`, `NIST SP 800-88`, `BSI IT-Grundschutz`, `Gutmann`)
 - [x] Freien Speicherplatz sicher überschreiben (`--wipe-free-space`) & Papierkorb sicher leeren (`--empty-recycle-bin`)
 - [x] HTML-Löschzertifikat-Export (`--export-certificate`)
-- [x] WiX-MSI-Installer (`BUILD_MSI.bat` -> `dist\OblivionSetup-2.1.2.msi`) inkl. Startmenü-Verknüpfung
+- [x] WiX-MSI-Installer (`BUILD_MSI.bat` -> `dist\OblivionSetup-2.1.4.msi`) inkl. Startmenü-Verknüpfung
 - [x] Zero-Readback und SHA-256-Readback des finalen Random-Passes
 - [x] isolierter, vor Freigabe sicher bereinigter Arbeitspuffer
 - [x] bestmöglicher `VirtualLock` des Arbeitspuffers gegen Paging
@@ -59,10 +59,10 @@ Der erste reale VS2022-Build hat drei Compilerprobleme offengelegt (COM-Export-B
 
 ## Verifiziert
 
-Version 2.1.1 wurde auf dem Windows-Zielrechner mit Visual Studio 2022 x64,
-Windows SDK und `/W4 /WX /permissive- /EHsc /utf-8` gebaut. Für 2.1.2 stehen
-der vollständige MSVC-Release-Build, CTest, MSI-Build und die gezielten
-Laufzeitprüfungen nach Abschluss der statischen Sicherheitsprüfung noch aus.
+Version 2.1.4 wurde auf dem Windows-Zielrechner mit Visual Studio 2022 x64,
+Windows SDK `10.0.26100.0` und `/W4 /WX /permissive- /EHsc /utf-8` gebaut;
+CTest (`3/3` Tests bestanden) und der WiX-MSI-Build (`dist\OblivionSetup-2.1.4.msi`)
+wurden erfolgreich ausgeführt.
 
 ```powershell
 .\BUILD_WINDOWS.bat

@@ -1,5 +1,6 @@
 #include "oblivion/shell_integration.hpp"
 #include "oblivion/cotaskmem_string.hpp"
+#include "oblivion/elevation.hpp"
 #include "oblivion/random.hpp"
 #include "oblivion/resource_ids.h"
 #include "oblivion/win_handle.hpp"
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace oblivion {
@@ -41,9 +43,128 @@ bool set_string(HKEY root, const std::wstring &key, const wchar_t *name,
   return result == ERROR_SUCCESS;
 }
 
-bool remove_key(const std::wstring &key) {
-  const LONG result = RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+bool remove_key(HKEY root, const std::wstring &key) {
+  const LONG result = RegDeleteTreeW(root, key.c_str());
   return result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
+}
+
+bool remove_key(const std::wstring &key) {
+  return remove_key(HKEY_CURRENT_USER, key);
+}
+
+bool key_exists(HKEY root, const std::wstring &key) noexcept {
+  HKEY handle{};
+  const LONG result =
+      RegOpenKeyExW(root, key.c_str(), 0, KEY_READ, &handle);
+  if (handle)
+    RegCloseKey(handle);
+  return result == ERROR_SUCCESS;
+}
+
+bool machine_wide_context_menu_present() noexcept {
+  for (const auto *class_root : {L"*", L"Directory"}) {
+    const auto base = L"Software\\Classes\\" + std::wstring{class_root} +
+                      L"\\shell\\";
+    for (const auto *name : {L"Oblivion", L"OblivionErase",
+                             L"OblivionAnalyze", L"OblivionSettings"}) {
+      if (key_exists(HKEY_LOCAL_MACHINE, base + name))
+        return true;
+    }
+  }
+  return key_exists(HKEY_LOCAL_MACHINE,
+                    L"Software\\Classes\\Drive\\shell\\OblivionWipeFree") ||
+         key_exists(HKEY_LOCAL_MACHINE,
+                    L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-"
+                    L"00AA002F954E}\\shell\\OblivionEmpty");
+}
+
+std::wstring quote_process_argument(const std::wstring_view value) {
+  std::wstring result{L"\""};
+  unsigned backslashes = 0;
+  for (const wchar_t character : value) {
+    if (character == L'\\') {
+      ++backslashes;
+      continue;
+    }
+    if (character == L'\"') {
+      result.append(backslashes * 2u + 1u, L'\\');
+      result.push_back(character);
+      backslashes = 0;
+      continue;
+    }
+    result.append(backslashes, L'\\');
+    backslashes = 0;
+    result.push_back(character);
+  }
+  result.append(backslashes * 2u, L'\\');
+  result.push_back(L'\"');
+  return result;
+}
+
+bool run_powershell_script(const std::filesystem::path &script,
+                           const std::vector<std::wstring> &arguments) {
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(script, error) || error)
+    return false;
+
+  std::wstring system_directory(32768, L'\0');
+  const UINT length = GetSystemDirectoryW(
+      system_directory.data(), static_cast<UINT>(system_directory.size()));
+  if (length == 0 || static_cast<std::size_t>(length) >= system_directory.size())
+    return false;
+  system_directory.resize(length);
+  const auto powershell = std::filesystem::path{system_directory} /
+                          L"WindowsPowerShell" / L"v1.0" /
+                          L"powershell.exe";
+
+  std::wstring command = quote_process_argument(powershell.wstring()) +
+                         L" -NoLogo -NoProfile -NonInteractive "
+                         L"-WindowStyle Hidden -ExecutionPolicy Bypass -File " +
+                         quote_process_argument(script.wstring());
+  for (const auto &argument : arguments)
+    command += L" " + quote_process_argument(argument);
+
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESHOWWINDOW;
+  startup.wShowWindow = SW_HIDE;
+  PROCESS_INFORMATION process{};
+  if (!CreateProcessW(powershell.c_str(), command.data(), nullptr, nullptr,
+                      FALSE, CREATE_NO_WINDOW, nullptr,
+                      script.parent_path().c_str(), &startup, &process))
+    return false;
+  unique_win_handle process_handle{process.hProcess};
+  unique_win_handle thread_handle{process.hThread};
+  const DWORD wait = WaitForSingleObject(process_handle.get(), 60000);
+  if (wait != WAIT_OBJECT_0) {
+    TerminateProcess(process_handle.get(), ERROR_TIMEOUT);
+    WaitForSingleObject(process_handle.get(), 5000);
+    return false;
+  }
+  DWORD exit_code = 1;
+  return GetExitCodeProcess(process_handle.get(), &exit_code) != FALSE &&
+         exit_code == 0;
+}
+
+bool register_modern_context_menu(const std::filesystem::path &source_exe) {
+  const auto directory = source_exe.parent_path();
+  const auto manifest = directory / L"AppxManifest.xml";
+  const auto script = directory / L"Register-Win11ContextMenu.ps1";
+  return run_powershell_script(
+      script, {L"-Manifest", manifest.wstring(), L"-ExternalLocation",
+               directory.wstring()});
+}
+
+bool unregister_modern_context_menu() {
+  std::wstring executable(32768, L'\0');
+  const DWORD length = GetModuleFileNameW(
+      nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+  if (length == 0 || static_cast<std::size_t>(length) >= executable.size())
+    return false;
+  executable.resize(length);
+  const auto script = std::filesystem::path{executable}.parent_path() /
+                      L"Unregister-Win11ContextMenu.ps1";
+  return run_powershell_script(script, {});
 }
 
 bool remove_legacy_commands() {
@@ -320,21 +441,17 @@ bool add_static_menu(const std::wstring &class_root,
   };
   const auto quoted_exe = L"\"" + executable + L"\"";
 
-  // Register direct top-level verbs instead of SubCommands="" so third-party
-  // context-menu replacements (e.g. Nilesoft Shell) and classic Explorer both
-  // display them.
-  bool ok = add_static_command(
-      base, L"OblivionErase", L"Mit Oblivion sicher löschen",
-      icon(IDI_OBLIVION_WARNING), quoted_exe + L" --shell-batch erase \"%1\"");
-  ok = ok && add_static_command(
-                 base, L"OblivionAnalyze",
-                 L"Mit Oblivion analysieren (Dry Run)",
-                 icon(IDI_OBLIVION_ANALYZE),
-                 quoted_exe + L" --shell-batch analyze \"%1\"");
-  ok = ok && add_static_command(base, L"OblivionSettings", L"Oblivion: Optionen",
-                                icon(IDI_OBLIVION_SETTINGS),
-                                quoted_exe + L" --settings-singleton");
-  return ok;
+  return add_static_command(base, L"OblivionErase",
+                            L"Mit Oblivion sicher löschen",
+                            icon(IDI_OBLIVION_WARNING),
+                            quoted_exe + L" --shell-batch erase \"%1\"") &&
+         add_static_command(base, L"OblivionAnalyze",
+                            L"Mit Oblivion analysieren (Dry Run)",
+                            icon(IDI_OBLIVION_ANALYZE),
+                            quoted_exe + L" --shell-batch analyze \"%1\"") &&
+         add_static_command(base, L"OblivionSettings", L"Oblivion Optionen",
+                            icon(IDI_OBLIVION_SETTINGS),
+                            quoted_exe + L" --settings-singleton");
 }
 
 bool clean_deployments() {
@@ -426,6 +543,51 @@ bool remove_com_registration() {
          ok;
   return ok;
 }
+bool remove_context_menu_keys(HKEY root) {
+  bool ok = true;
+  for (const auto *class_root : {L"*", L"Directory"}) {
+    const auto base = L"Software\\Classes\\" + std::wstring{class_root} +
+                      L"\\shell\\";
+    ok = remove_key(root, base + L"Oblivion") && ok;
+    ok = remove_key(root, base + L"OblivionErase") && ok;
+    ok = remove_key(root, base + L"OblivionAnalyze") && ok;
+    ok = remove_key(root, base + L"OblivionSettings") && ok;
+  }
+  ok = remove_key(root, L"Software\\Classes\\Drive\\shell\\OblivionWipeFree") &&
+       ok;
+  ok = remove_key(root,
+                  L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-"
+                  L"00AA002F954E}\\shell\\OblivionEmpty") &&
+       ok;
+  return ok;
+}
+
+bool try_elevated_machine_uninstall() {
+  std::wstring current(32768, L'\0');
+  const DWORD length = GetModuleFileNameW(
+      nullptr, current.data(), static_cast<DWORD>(current.size()));
+  std::vector<std::filesystem::path> candidates;
+  if (length > 0 && static_cast<std::size_t>(length) < current.size()) {
+    current.resize(length);
+    candidates.emplace_back(current);
+  }
+  unique_cotaskmem_string program_files;
+  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, KF_FLAG_DONT_VERIFY,
+                                     nullptr, program_files.put())) &&
+      program_files) {
+    const auto installed =
+        std::filesystem::path{program_files.get()} / L"Oblivion" / L"Oblivion.exe";
+    candidates.push_back(installed);
+  }
+
+  for (const auto &candidate : candidates) {
+    DWORD exit_code = 1;
+    if (relaunch_elevated_and_wait(candidate, {L"--uninstall-shell-quiet"},
+                                   exit_code))
+      return exit_code == 0;
+  }
+  return false;
+}
 } // namespace
 
 shell_result install_context_menu(const std::filesystem::path &exe,
@@ -445,6 +607,7 @@ shell_result install_context_menu(const std::filesystem::path &exe,
     ok = ok && add_static_menu(class_root, installed_exe);
   ok = ok && add_drive_menu(installed_exe);
   ok = ok && add_recycle_bin_menu(installed_exe);
+  ok = ok && register_modern_context_menu(exe);
 
   if (!ok) {
     const auto rollback = uninstall_context_menu();
@@ -458,28 +621,43 @@ shell_result install_context_menu(const std::filesystem::path &exe,
 
   SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
   return {true,
-          L"OBLIVION-Kontextmenü installiert. Mehrfachauswahl wird nativ "
-          L"in Oblivion.exe gebündelt; Explorer lädt keine OBLIVION-COM-DLL."};
+          L"OBLIVION-Untermenü für das moderne und klassische Explorer-Menü "
+          L"installiert. Mehrfachauswahl wird nativ unterstützt."};
 }
 
 shell_result uninstall_context_menu() {
-  bool ok = true;
-  for (const auto *class_root : {L"*", L"Directory"}) {
-    const auto base = L"Software\\Classes\\" + std::wstring{class_root} +
-                      L"\\shell\\";
-    ok = remove_key(base + L"Oblivion") && ok;
-    ok = remove_key(base + L"OblivionErase") && ok;
-    ok = remove_key(base + L"OblivionAnalyze") && ok;
-    ok = remove_key(base + L"OblivionSettings") && ok;
-  }
-  ok = remove_key(L"Software\\Classes\\Drive\\shell\\OblivionWipeFree") && ok;
-  ok = remove_key(L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\shell\\OblivionEmpty") && ok;
+  bool ok = unregister_modern_context_menu();
+  ok = remove_context_menu_keys(HKEY_CURRENT_USER) && ok;
   ok = remove_legacy_commands() && ok;
   ok = remove_com_registration() && ok;
   ok = clean_deployments() && ok;
+
+  bool removed_machine_wide = false;
+  if (machine_wide_context_menu_present()) {
+    if (is_process_elevated()) {
+      const bool machine_ok = remove_context_menu_keys(HKEY_LOCAL_MACHINE);
+      ok = machine_ok && ok;
+      removed_machine_wide = machine_ok && !machine_wide_context_menu_present();
+    } else if (ok && try_elevated_machine_uninstall() &&
+               !machine_wide_context_menu_present()) {
+      removed_machine_wide = true;
+    }
+  }
+
   SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
-  return {ok, ok ? L"OBLIVION-Shellintegration entfernt."
-                 : L"Shellintegration konnte nicht vollständig entfernt "
+  if (!ok)
+    return {false, L"Shellintegration konnte nicht vollständig entfernt "
                    L"werden."};
+  if (machine_wide_context_menu_present())
+    return {true,
+            L"Benutzerbezogene OBLIVION-Shellintegration entfernt. "
+            L"Systemweit durch den MSI-Installer installierte Einträge bleiben "
+            L"bestehen und müssen über die installierte Anwendung entfernt "
+            L"oder aktualisiert werden."};
+  if (removed_machine_wide)
+    return {true,
+            L"OBLIVION-Shellintegration (inkl. systemweiter MSI-Einträge) "
+            L"entfernt."};
+  return {true, L"OBLIVION-Shellintegration entfernt."};
 }
 } // namespace oblivion

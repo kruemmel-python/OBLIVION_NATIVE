@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ============================================================
-echo  OBLIVION NATIVE 2.1.2 - MSI INSTALLER BUILD
+echo  OBLIVION NATIVE 2.1.4 - MSI INSTALLER BUILD
 echo  WiX Toolset v7 / x64 / WixUI / Explorer Shell Verbs
 echo ============================================================
 
@@ -33,7 +33,7 @@ echo [INFO] WiX Compiler: %WIX_EXE%
 "%WIX_EXE%" build "installer\Oblivion.wxs" ^
   -arch x64 ^
   -ext WixToolset.UI.wixext ^
-  -o "dist\OblivionSetup-2.1.2.msi"
+  -o "dist\OblivionSetup-2.1.4.msi"
 
 if errorlevel 1 (
   echo [ERROR] MSI-Erstellung fehlgeschlagen.
@@ -43,7 +43,7 @@ if errorlevel 1 (
 echo.
 echo ============================================================
 echo [OK] MSI-Installer erfolgreich erstellt:
-echo      %CD%\dist\OblivionSetup-2.1.2.msi
+echo      %CD%\dist\OblivionSetup-2.1.4.msi
 echo ============================================================
 
 endlocal
