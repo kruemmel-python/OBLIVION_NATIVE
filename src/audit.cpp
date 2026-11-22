@@ -1,17 +1,23 @@
 #include "oblivion/audit.hpp"
 #include "oblivion/audit_integrity.hpp"
+#include "oblivion/bcrypt_handle.hpp"
+#include "oblivion/cotaskmem_string.hpp"
+#include "oblivion/win_handle.hpp"
 #include <Windows.h>
+#include <ShlObj.h>
 #include <algorithm>
 #include <bcrypt.h>
 #include <cstddef>
 #include <cwctype>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <objbase.h>
 #include <sstream>
 #include <string>
 #include <vector>
+#ifdef OBLIVION_TESTING
+#include "oblivion/test_hooks.hpp"
+#endif
 namespace oblivion {
 namespace {
 std::wstring mn(erase_mode m) {
@@ -60,22 +66,24 @@ std::string utf8(const std::wstring &w) {
   return r;
 }
 std::vector<std::byte> sha(const std::string &s) {
-  BCRYPT_ALG_HANDLE a = nullptr;
-  BCRYPT_HASH_HANDLE h = nullptr;
+  unique_bcrypt_algorithm a;
   DWORD ol = 0, hl = 0, n = 0;
-  if (BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
+  if (BCryptOpenAlgorithmProvider(a.put(), BCRYPT_SHA256_ALGORITHM, nullptr,
+                                  0) < 0)
     return {};
-  if (BCryptGetProperty(a, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&ol),
-                        sizeof(ol), &n, 0) < 0 ||
-      BCryptGetProperty(a, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hl),
-                        sizeof(hl), &n, 0) < 0) {
-    BCryptCloseAlgorithmProvider(a, 0);
+  if (BCryptGetProperty(a.get(), BCRYPT_OBJECT_LENGTH,
+                        reinterpret_cast<PUCHAR>(&ol), sizeof(ol), &n, 0) < 0 ||
+      BCryptGetProperty(a.get(), BCRYPT_HASH_LENGTH,
+                        reinterpret_cast<PUCHAR>(&hl), sizeof(hl), &n, 0) < 0) {
     return {};
   }
   std::vector<std::byte> o(ol), d(hl);
-  if (BCryptCreateHash(a, &h, reinterpret_cast<PUCHAR>(o.data()), ol, nullptr,
-                       0, 0) < 0) {
-    BCryptCloseAlgorithmProvider(a, 0);
+  // BCrypt may retain the caller-owned hash-object buffer until the hash
+  // handle is destroyed. Declare the handle after its backing storage so the
+  // handle is released first during stack unwinding.
+  unique_bcrypt_hash h;
+  if (BCryptCreateHash(a.get(), h.put(), reinterpret_cast<PUCHAR>(o.data()), ol,
+                       nullptr, 0, 0) < 0) {
     return {};
   }
   std::size_t off = 0;
@@ -84,7 +92,8 @@ std::vector<std::byte> sha(const std::string &s) {
         s.size() - off,
         static_cast<std::size_t>((std::numeric_limits<ULONG>::max)())));
     if (BCryptHashData(
-            h, reinterpret_cast<PUCHAR>(const_cast<char *>(s.data() + off)), c,
+            h.get(),
+            reinterpret_cast<PUCHAR>(const_cast<char *>(s.data() + off)), c,
             0) < 0) {
       d.clear();
       break;
@@ -92,10 +101,8 @@ std::vector<std::byte> sha(const std::string &s) {
     off += c;
   }
   if (!d.empty() &&
-      BCryptFinishHash(h, reinterpret_cast<PUCHAR>(d.data()), hl, 0) < 0)
+      BCryptFinishHash(h.get(), reinterpret_cast<PUCHAR>(d.data()), hl, 0) < 0)
     d.clear();
-  BCryptDestroyHash(h);
-  BCryptCloseAlgorithmProvider(a, 0);
   return d;
 }
 std::string hex(const std::vector<std::byte> &d) {
@@ -120,27 +127,202 @@ std::wstring frag(const std::wstring &id) {
 }
 } // namespace
 std::filesystem::path audit_directory() {
-  std::wstring v(32768, L'\0');
-  DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", v.data(),
-                                    static_cast<DWORD>(v.size()));
-  if (n && static_cast<std::size_t>(n) < v.size()) {
-    v.resize(n);
-    return std::filesystem::path{v} / L"Oblivion" / L"Audit";
-  }
-  return std::filesystem::temp_directory_path() / L"Oblivion" / L"Audit";
+#ifdef OBLIVION_TESTING
+  if (testing::hooks().audit_directory)
+    return testing::hooks().audit_directory();
+#endif
+  unique_cotaskmem_string local;
+  const HRESULT result = SHGetKnownFolderPath(
+      FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, local.put());
+  if (FAILED(result) || !local)
+    return {};
+  std::filesystem::path directory =
+      std::filesystem::path{local.get()} / L"Oblivion" / L"Audit";
+  return directory;
 }
-std::wstring create_operation_id() {
+bool prepare_audit_directory(std::filesystem::path &directory) noexcept try {
+  directory = audit_directory();
+  if (directory.empty() || !directory.is_absolute())
+    return false;
+
+  std::filesystem::path current = directory.root_path();
+  if (current.empty())
+    return false;
+  std::vector<unique_win_handle> locks;
+  for (const auto &component : directory.relative_path()) {
+    current /= component;
+    DWORD attributes = GetFileAttributesW(current.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+      const DWORD error = GetLastError();
+      if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+        return false;
+      if (CreateDirectoryW(current.c_str(), nullptr) == FALSE) {
+        const DWORD create_error = GetLastError();
+        if (create_error != ERROR_ALREADY_EXISTS)
+          return false;
+      }
+      attributes = GetFileAttributesW(current.c_str());
+    }
+    unique_win_handle handle{CreateFileW(
+        current.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    FILE_ATTRIBUTE_TAG_INFO verified{};
+    if (attributes == INVALID_FILE_ATTRIBUTES || !handle ||
+        !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+                                      &verified, sizeof(verified)) ||
+        (verified.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (verified.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+      return false;
+    locks.push_back(std::move(handle));
+  }
+  return true;
+} catch (...) {
+  directory.clear();
+  return false;
+}
+
+namespace {
+bool lock_audit_directory_tree(
+    const std::filesystem::path &directory,
+    std::vector<unique_win_handle> &locks) noexcept try {
+  locks.clear();
+  auto current = directory.root_path();
+  if (current.empty())
+    return false;
+  for (const auto &component : directory.relative_path()) {
+    if (component.empty() || component == L".")
+      continue;
+    if (component == L"..")
+      return false;
+    current /= component;
+    unique_win_handle handle{CreateFileW(
+        current.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (!handle ||
+        !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+                                      &attributes, sizeof(attributes)) ||
+        (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+      return false;
+    locks.push_back(std::move(handle));
+  }
+  return true;
+} catch (...) {
+  return false;
+}
+
+void discard_created_file(unique_win_handle &output) noexcept {
+  FILE_DISPOSITION_INFO disposition{TRUE};
+  (void)SetFileInformationByHandle(output.get(), FileDispositionInfo,
+                                   &disposition, sizeof(disposition));
+  output.reset();
+}
+class created_file_guard final {
+public:
+  explicit created_file_guard(unique_win_handle &file) noexcept : file_(file) {}
+  ~created_file_guard() {
+    if (armed_ && file_)
+      discard_created_file(file_);
+  }
+  created_file_guard(const created_file_guard &) = delete;
+  created_file_guard &operator=(const created_file_guard &) = delete;
+  void commit() noexcept { armed_ = false; }
+
+private:
+  unique_win_handle &file_;
+  bool armed_{true};
+};
+
+bool create_new_audit_file(const std::filesystem::path &file,
+                           const std::string_view contents,
+                           unique_win_handle &output) noexcept try {
+  std::filesystem::path directory;
+  if (!prepare_audit_directory(directory) || file.filename().empty())
+    return false;
+  std::vector<unique_win_handle> directory_locks;
+  if (!lock_audit_directory_tree(directory, directory_locks))
+    return false;
+  std::error_code equivalent_error;
+  if (!std::filesystem::equivalent(file.parent_path(), directory,
+                                   equivalent_error) ||
+      equivalent_error)
+    return false;
+
+  output.reset(CreateFileW(
+      file.c_str(), GENERIC_WRITE | DELETE, FILE_SHARE_READ, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr));
+  if (!output)
+    return false;
+  std::size_t offset = 0;
+  while (offset < contents.size()) {
+    const DWORD count = static_cast<DWORD>((std::min)(
+        contents.size() - offset,
+        static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+    DWORD written = 0;
+    if (!WriteFile(output.get(), contents.data() + offset, count, &written,
+                   nullptr) ||
+        written != count) {
+      discard_created_file(output);
+      return false;
+    }
+    offset += written;
+  }
+  if (FlushFileBuffers(output.get()) == FALSE) {
+    discard_created_file(output);
+    return false;
+  }
+  return true;
+} catch (...) {
+  return false;
+}
+} // namespace
+
+bool write_new_audit_file(const std::filesystem::path &file,
+                          const std::string_view contents) noexcept {
+  unique_win_handle output;
+  return create_new_audit_file(file, contents, output);
+}
+
+bool write_new_audit_file(const std::filesystem::path &file,
+                          const std::wstring_view contents) noexcept try {
+  const auto encoded = utf8(std::wstring{contents});
+  return !contents.empty() && !encoded.empty() &&
+         write_new_audit_file(file, encoded);
+} catch (...) {
+  return false;
+}
+
+bool write_sealed_audit_file(const std::filesystem::path &file,
+                             const std::wstring_view contents) noexcept try {
+  const auto encoded = utf8(std::wstring{contents});
+  unique_win_handle output;
+  if (contents.empty() || encoded.empty() ||
+      !create_new_audit_file(file, encoded, output))
+    return false;
+  if (!seal_audit_file_contents(file, encoded)) {
+    discard_created_file(output);
+    return false;
+  }
+  return true;
+} catch (...) {
+  return false;
+}
+std::wstring create_operation_id() noexcept try {
   GUID g{};
   if (FAILED(CoCreateGuid(&g)))
-    return L"unknown";
+    return {};
   wchar_t b[64]{};
-  return StringFromGUID2(g, b, 64) > 0 ? std::wstring{b} : L"unknown";
+  return StringFromGUID2(g, b, 64) > 0 ? std::wstring{b} : std::wstring{};
+} catch (...) {
+  return {};
 }
-std::filesystem::path write_audit_record(const operation_audit &r) {
-  std::error_code ec;
-  auto dir = audit_directory();
-  std::filesystem::create_directories(dir, ec);
-  if (ec)
+std::filesystem::path write_audit_record(const operation_audit &r) noexcept try {
+  std::filesystem::path dir;
+  if (!prepare_audit_directory(dir) || r.operation_id.empty())
     return {};
   auto f =
       dir / (L"oblivion_" + stamp() + L"_" + frag(r.operation_id) + L".log");
@@ -200,26 +382,26 @@ std::filesystem::path write_audit_record(const operation_audit &r) {
       << audit_reference(x.application_name) << L" ServiceRef="
       << audit_reference(x.service_name) << L"\n";
   auto t = utf8(o.str());
-  std::ofstream out(f, std::ios::binary | std::ios::trunc);
-  if (!out)
+  unique_win_handle record_handle;
+  if (!create_new_audit_file(f, t, record_handle))
     return {};
-  out.write(t.data(), static_cast<std::streamsize>(t.size()));
-  out.close();
+  created_file_guard record_guard{record_handle};
   auto d = sha(t);
-  if (!d.empty()) {
-    auto hf = f;
-    hf += L".sha256";
-    std::ofstream h(hf, std::ios::binary | std::ios::trunc);
-    if (h)
-      h << hex(d) << "\n";
-  }
-  if (!seal_audit_file(f)) {
-    std::filesystem::remove(f, ec);
-    auto hash_file = f;
-    hash_file += L".sha256";
-    std::filesystem::remove(hash_file, ec);
+  if (d.empty())
     return {};
-  }
+  auto hf = f;
+  hf += L".sha256";
+  const auto digest_text = hex(d) + "\n";
+  unique_win_handle hash_handle;
+  if (!create_new_audit_file(hf, digest_text, hash_handle))
+    return {};
+  created_file_guard hash_guard{hash_handle};
+  if (!seal_audit_file_contents(f, t))
+    return {};
+  hash_guard.commit();
+  record_guard.commit();
   return f;
+} catch (...) {
+  return {};
 }
 } // namespace oblivion

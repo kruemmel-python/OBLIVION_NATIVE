@@ -3,6 +3,7 @@
 #include "oblivion/app_logic.hpp"
 #include "oblivion/audit.hpp"
 #include "oblivion/certificate.hpp"
+#include "oblivion/cotaskmem_string.hpp"
 #include "oblivion/elevation.hpp"
 #include "oblivion/progress_window.hpp"
 #include "oblivion/recycle_bin.hpp"
@@ -32,6 +33,33 @@
 
 namespace oblivion {
 namespace {
+
+template <typename T> class com_ptr {
+  T *value_{};
+
+public:
+  com_ptr() = default;
+  ~com_ptr() {
+    if (value_)
+      value_->Release();
+  }
+  com_ptr(const com_ptr &) = delete;
+  com_ptr &operator=(const com_ptr &) = delete;
+  T *operator->() const noexcept { return value_; }
+  T **put() noexcept { return &value_; }
+  explicit operator bool() const noexcept { return value_ != nullptr; }
+};
+
+class drop_handle_guard {
+  HDROP value_{};
+
+public:
+  explicit drop_handle_guard(HDROP value) noexcept : value_(value) {}
+  ~drop_handle_guard() {
+    if (value_)
+      DragFinish(value_);
+  }
+};
 
 constexpr int ID_LIST_TARGETS = 5101;
 constexpr int ID_BTN_ADD_FILES = 5102;
@@ -176,7 +204,7 @@ void refresh_target_list(main_state &s) {
 }
 
 void add_unique_target(main_state &s, const std::filesystem::path &path) {
-  if (path.empty())
+  if (path.empty() || s.targets.size() >= max_operation_targets)
     return;
   for (const auto &existing : s.targets) {
     if (_wcsicmp(existing.c_str(), path.c_str()) == 0)
@@ -190,8 +218,9 @@ void populate_drives(main_state &s) {
   s.drive_roots.clear();
 
   wchar_t drives[512]{};
-  const DWORD len = GetLogicalDriveStringsW(511, drives);
-  if (!len)
+  const DWORD len = GetLogicalDriveStringsW(
+      static_cast<DWORD>(std::size(drives)), drives);
+  if (!len || len >= std::size(drives))
     return;
 
   for (const wchar_t *p = drives; *p; p += wcslen(p) + 1) {
@@ -242,9 +271,10 @@ void browse_files(main_state &s) {
 }
 
 void browse_folders(main_state &s) {
-  IFileOpenDialog *dialog = nullptr;
+  com_ptr<IFileOpenDialog> dialog;
   if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
-                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))) ||
+                              CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(dialog.put()))) ||
       !dialog) {
     return;
   }
@@ -256,27 +286,27 @@ void browse_folders(main_state &s) {
   dialog->SetTitle(L"Ordner für Oblivion auswählen");
 
   if (SUCCEEDED(dialog->Show(s.hwnd))) {
-    IShellItemArray *items = nullptr;
-    if (SUCCEEDED(dialog->GetResults(&items)) && items) {
+    com_ptr<IShellItemArray> items;
+    if (SUCCEEDED(dialog->GetResults(items.put())) && items) {
       DWORD count = 0;
       if (SUCCEEDED(items->GetCount(&count))) {
-        for (DWORD i = 0; i < count; ++i) {
-          IShellItem *item = nullptr;
-          if (SUCCEEDED(items->GetItemAt(i, &item)) && item) {
+        const auto limit = static_cast<DWORD>((std::min)(
+            static_cast<std::uint64_t>(count),
+            static_cast<std::uint64_t>(max_operation_targets)));
+        for (DWORD i = 0; i < limit; ++i) {
+          com_ptr<IShellItem> item;
+          if (SUCCEEDED(items->GetItemAt(i, item.put())) && item) {
             PWSTR path = nullptr;
             if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) &&
                 path) {
-              add_unique_target(s, std::filesystem::path{path});
-              CoTaskMemFree(path);
+              unique_cotaskmem_string path_owner{path};
+              add_unique_target(s, std::filesystem::path{path_owner.get()});
             }
-            item->Release();
           }
         }
       }
-      items->Release();
     }
   }
-  dialog->Release();
   refresh_target_list(s);
 }
 
@@ -290,8 +320,14 @@ void remove_selected_target(main_state &s) {
 
 bool confirm_hardlink_policy(HWND owner, erase_options &o,
                              const file_analysis &a) {
-  if (!a.hardlinked_files)
+  if (!a.hardlinked_files && !requires_hardlink_confirmation(o))
     return true;
+  if (!a.hardlinked_files)
+    return typed_confirmation(
+        L"Hardlink Shared Content",
+        L"Die gefährliche Shared-Hardlink-Strategie bleibt auch dann aktiv, "
+        L"wenn Hardlinks erst nach der Voranalyse entstehen.",
+        L"HARDLINK");
   constexpr int BLOCK = 4201, DEL = 4202, OVER = 4203;
   TASKDIALOG_BUTTON bs[] = {
       {BLOCK, L"Blockieren"},
@@ -308,7 +344,7 @@ bool confirm_hardlink_policy(HWND owner, erase_options &o,
   c.pszMainInstruction = L"Hardlink-Strategie wählen";
   c.pszContent =
       L"Mehrere Namen können denselben Dateidatensatz referenzieren.";
-  c.cButtons = 3;
+  c.cButtons = shared_hardlink_overwrite_allowed() ? 3u : 2u;
   c.pButtons = bs;
   c.nDefaultButton =
       o.hardlinks == hardlink_policy::delete_link_only ? DEL : BLOCK;
@@ -337,22 +373,7 @@ bool confirm_hardlink_policy(HWND owner, erase_options &o,
 std::vector<std::wstring> build_elevation_args(
     const erase_options &options,
     const std::vector<std::filesystem::path> &targets) {
-  std::vector<std::wstring> result{L"--elevated-retry"};
-  switch (options.mode) {
-  case erase_mode::fast: result.push_back(L"--fast"); break;
-  case erase_mode::strong: result.push_back(L"--strong"); break;
-  case erase_mode::dod_5220_22_m: result.push_back(L"--dod"); break;
-  case erase_mode::nist_800_88: result.push_back(L"--nist"); break;
-  case erase_mode::bsi_gs: result.push_back(L"--bsi"); break;
-  case erase_mode::gutmann: result.push_back(L"--gutmann"); break;
-  case erase_mode::standard:
-  default: result.push_back(L"--standard"); break;
-  }
-  if (!options.verify)
-    result.push_back(L"--no-verify");
-  for (const auto &target : targets)
-    result.push_back(target.wstring());
-  return result;
+  return build_elevation_arguments(options, targets);
 }
 
 void run_targets_action(main_state &s, const bool analyze_only) {
@@ -402,18 +423,25 @@ void run_targets_action(main_state &s, const bool analyze_only) {
       L"OBLIVION - Sicheres Löschen",
       [&](const progress_callback &cb, const std::function<bool()> &stop) {
         return execute_prepared_operation(p, o, cb, stop);
-      });
+      },
+      s.hwnd);
 
   MessageBoxW(s.hwnd, r.summary.c_str(), L"Oblivion",
               MB_OK | (r.exit_code == 0 ? MB_ICONINFORMATION : MB_ICONWARNING));
 
-  if (r.exit_code == 5 && !is_process_elevated() &&
+  if (r.exit_code == 5 && !r.elevation_retry_targets.empty() &&
+      !is_process_elevated() &&
       MessageBoxW(
           s.hwnd,
           L"Zugriff verweigert. Mit Administratorrechten erneut versuchen?",
           L"Oblivion", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
-    (void)relaunch_elevated(current_exe_path(),
-                            build_elevation_args(o, p.targets));
+    if (!relaunch_elevated(current_exe_path(),
+                            build_elevation_args(
+                                o, r.elevation_retry_targets)))
+      MessageBoxW(s.hwnd,
+                  L"Der Neustart mit Administratorrechten ist fehlgeschlagen "
+                  L"oder wurde abgebrochen.",
+                  L"Oblivion", MB_OK | MB_ICONERROR);
   }
 
   if (r.exit_code == 0) {
@@ -430,7 +458,8 @@ void run_targets_action(main_state &s, const bool analyze_only) {
 void run_recycle_bin_action(main_state &s) {
   const int btn = MessageBoxW(
       s.hwnd,
-      L"Möchten Sie alle Dateien im Windows-Papierkorb aller Laufwerke "
+      L"Möchten Sie alle Dateien im Windows-Papierkorb aller unterstützten "
+      L"lokalen Laufwerke "
       L"unwiderruflich und sicher überschreiben?",
       L"Oblivion · Papierkorb sicher leeren",
       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
@@ -445,7 +474,8 @@ void run_recycle_bin_action(main_state &s) {
         const auto r = secure_empty_recycle_bin(o, cb);
         return gui_run_result{r.success, r.cancelled, r.success ? 0 : 1,
                               r.message};
-      });
+      },
+      s.hwnd);
   MessageBoxW(s.hwnd, res.summary.c_str(), L"Oblivion · Papierkorb",
               MB_OK | (res.exit_code == 0 ? MB_ICONINFORMATION : MB_ICONERROR));
   populate_drives(s);
@@ -478,7 +508,8 @@ void run_wipe_free_space_action(main_state &s) {
         const auto r = wipe_volume_free_space(target, o, cb);
         return gui_run_result{r.success, r.cancelled, r.success ? 0 : 1,
                               r.message};
-      });
+      },
+      s.hwnd);
   MessageBoxW(s.hwnd, res.summary.c_str(), L"Oblivion · Freispeicher",
               MB_OK | (res.exit_code == 0 ? MB_ICONINFORMATION : MB_ICONERROR));
   populate_drives(s);
@@ -512,9 +543,19 @@ void export_certificate_action(main_state &s) {
   out_file.replace_extension(L".html");
 
   if (generate_certificate_from_audit(audit_file, out_file)) {
-    ShellExecuteW(nullptr, L"open", out_file.c_str(), nullptr, nullptr,
-                  SW_SHOWNORMAL);
-    set_status(s, L"Löschzertifikat erstellt: " + out_file.filename().wstring());
+    const auto opened = ShellExecuteW(nullptr, L"open", out_file.c_str(),
+                                      nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+      MessageBoxW(s.hwnd,
+                  L"Zertifikat wurde erstellt, konnte aber nicht im "
+                  L"Standardbrowser geöffnet werden.",
+                  L"Oblivion · Zertifikat", MB_OK | MB_ICONWARNING);
+      set_status(s, L"Löschzertifikat erstellt, Browserstart fehlgeschlagen: " +
+                        out_file.filename().wstring());
+    } else {
+      set_status(s,
+                 L"Löschzertifikat erstellt: " + out_file.filename().wstring());
+    }
   } else {
     MessageBoxW(s.hwnd,
                 L"Löschzertifikat konnte nicht aus dieser Datei generiert werden.",
@@ -537,13 +578,10 @@ void enable_drop_messages(HWND target) {
     return;
   DragAcceptFiles(target, TRUE);
   ChangeWindowMessageFilterEx(target, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
-  ChangeWindowMessageFilterEx(target, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
-  ChangeWindowMessageFilterEx(target, 0x0049 /* WM_COPYGLOBALDATA */,
-                              MSGFLT_ALLOW, nullptr);
 }
 
 LRESULT CALLBACK list_drop_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
-                                UINT_PTR id, DWORD_PTR ref_data) {
+                                UINT_PTR id, DWORD_PTR ref_data) noexcept try {
   (void)id;
   if (msg == WM_DROPFILES) {
     auto parent = reinterpret_cast<HWND>(ref_data);
@@ -553,9 +591,11 @@ LRESULT CALLBACK list_drop_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
   if (msg == WM_NCDESTROY)
     RemoveWindowSubclass(hwnd, list_drop_proc, 1);
   return DefSubclassProc(hwnd, msg, w, l);
+} catch (...) {
+  return DefSubclassProc(hwnd, msg, w, l);
 }
 
-LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) noexcept try {
   auto *s = reinterpret_cast<main_state *>(GetWindowLongPtrW(h, GWLP_USERDATA));
   switch (m) {
   case WM_NCCREATE: {
@@ -595,7 +635,7 @@ LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
       SendMessageW(s->icon_ctrl, STM_SETICON, reinterpret_cast<WPARAM>(hi), 0);
     }
 
-    s->title_lbl = make_label(h, L"Oblivion Native 2.1.1", 72, 14, 420, 26,
+    s->title_lbl = make_label(h, L"Oblivion Native 2.1.2", 72, 14, 420, 26,
                               s->font_title, dark);
     s->subtitle_lbl = make_label(
         h, L"Sichere Dateivernichtung, Datenträgeranalyse && Compliance", 72, 42,
@@ -675,8 +715,13 @@ LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
   }
   case WM_DROPFILES: {
     auto drop = reinterpret_cast<HDROP>(w);
+    drop_handle_guard finish_drop{drop};
     const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-    for (UINT i = 0; i < count; ++i) {
+    const auto limit = static_cast<UINT>((std::min)(
+        static_cast<std::uint64_t>(count),
+        static_cast<std::uint64_t>(max_operation_targets)));
+    for (UINT i = 0; i < limit && s->targets.size() < max_operation_targets;
+         ++i) {
       const UINT needed = DragQueryFileW(drop, i, nullptr, 0);
       if (!needed)
         continue;
@@ -686,7 +731,6 @@ LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         add_unique_target(*s, std::filesystem::path{path});
       }
     }
-    DragFinish(drop);
     refresh_target_list(*s);
     return 0;
   }
@@ -780,6 +824,12 @@ LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     break;
   }
   return DefWindowProcW(h, m, w, l);
+} catch (...) {
+  SetWindowLongPtrW(h, GWLP_USERDATA, 0);
+  if (IsWindow(h))
+    DestroyWindow(h);
+  PostQuitMessage(10);
+  return 0;
 }
 
 } // namespace
@@ -810,7 +860,7 @@ int show_main_window() {
   main_state state{};
   HWND hwnd = CreateWindowExW(
       WS_EX_APPWINDOW | WS_EX_ACCEPTFILES, CLASS_NAME,
-      L"Oblivion Native 2.1.1 – Sichere Dateivernichtung",
+      L"Oblivion Native 2.1.2 – Sichere Dateivernichtung",
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, pos_x, pos_y,
       width, height, nullptr, nullptr, GetModuleHandleW(nullptr), &state);
   if (!hwnd)

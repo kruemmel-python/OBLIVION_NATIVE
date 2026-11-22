@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 echo ============================================================
-echo  OBLIVION NATIVE 2.1.1 - WINDOWS BUILD
+echo  OBLIVION NATIVE 2.1.2 - WINDOWS BUILD
 echo  C++20 / Win32 / Static Shell / Native Batch / BCrypt / WMI / RM
 echo ============================================================
 set "CMAKE_EXE="
@@ -26,6 +26,10 @@ if exist build rmdir /s /q build
 if errorlevel 1 exit /b 1
 "%CMAKE_EXE%" --build build --config Release --parallel
 if errorlevel 1 exit /b 1
+for %%T in ("%CMAKE_EXE%") do set "CTEST_EXE=%%~dpTctest.exe"
+if not exist "%CTEST_EXE%" (echo [ERROR] CTest neben CMake nicht gefunden.& exit /b 1)
+"%CTEST_EXE%" --test-dir build -C Release --output-on-failure
+if errorlevel 1 (echo [ERROR] Native Release-Tests fehlgeschlagen.& exit /b 1)
 if exist "dist\OblivionShell.dll" (
   del /q "dist\OblivionShell.dll" >nul 2>&1
   if exist "dist\OblivionShell.dll" (echo [ERROR] OblivionShell.dll wird noch von Explorer verwendet. Shell entfernen und Explorer/Windows neu starten.& exit /b 1)

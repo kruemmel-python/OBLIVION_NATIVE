@@ -14,20 +14,37 @@
 #include <sstream>
 namespace oblivion {
 namespace {
+std::uint64_t sadd(std::uint64_t a, std::uint64_t b) {
+  const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+  return b > maximum - a ? maximum : a + b;
+}
+bool cancellation_requested(const std::function<bool()> &cancel) noexcept {
+  try {
+    return cancel && cancel();
+  } catch (...) {
+    return true;
+  }
+}
 void merge(file_analysis &a, const file_analysis &b) {
-  a.files += b.files;
-  a.directories += b.directories;
-  a.logical_bytes += b.logical_bytes;
-  a.alternate_streams += b.alternate_streams;
-  a.alternate_stream_bytes += b.alternate_stream_bytes;
-  a.reparse_points += b.reparse_points;
-  a.hardlinked_files += b.hardlinked_files;
-  a.sparse_files += b.sparse_files;
-  a.compressed_files += b.compressed_files;
-  a.encrypted_files += b.encrypted_files;
-  a.readonly_entries += b.readonly_entries;
-  a.inaccessible_entries += b.inaccessible_entries;
-  a.warnings.insert(a.warnings.end(), b.warnings.begin(), b.warnings.end());
+  a.files = sadd(a.files, b.files);
+  a.directories = sadd(a.directories, b.directories);
+  a.logical_bytes = sadd(a.logical_bytes, b.logical_bytes);
+  a.alternate_streams = sadd(a.alternate_streams, b.alternate_streams);
+  a.alternate_stream_bytes =
+      sadd(a.alternate_stream_bytes, b.alternate_stream_bytes);
+  a.reparse_points = sadd(a.reparse_points, b.reparse_points);
+  a.hardlinked_files = sadd(a.hardlinked_files, b.hardlinked_files);
+  a.sparse_files = sadd(a.sparse_files, b.sparse_files);
+  a.compressed_files = sadd(a.compressed_files, b.compressed_files);
+  a.encrypted_files = sadd(a.encrypted_files, b.encrypted_files);
+  a.readonly_entries = sadd(a.readonly_entries, b.readonly_entries);
+  a.inaccessible_entries = sadd(a.inaccessible_entries, b.inaccessible_entries);
+  constexpr std::size_t max_warnings = 256;
+  for (const auto &warning : b.warnings) {
+    if (a.warnings.size() >= max_warnings)
+      break;
+    a.warnings.push_back(warning);
+  }
 }
 std::wstring low(std::wstring v) {
   std::transform(v.begin(), v.end(), v.begin(), [](wchar_t c) {
@@ -60,10 +77,6 @@ std::uint64_t pc(erase_mode m) {
   case erase_mode::gutmann: return 35;
   default: return 2;
   }
-}
-std::uint64_t sadd(std::uint64_t a, std::uint64_t b) {
-  auto m = (std::numeric_limits<std::uint64_t>::max)();
-  return b > m - a ? m : a + b;
 }
 std::uint64_t smul(std::uint64_t a, std::uint64_t b) {
   auto m = (std::numeric_limits<std::uint64_t>::max)();
@@ -98,6 +111,12 @@ prepare_operation(const std::vector<std::filesystem::path> &raw) {
   prepared_operation p;
   if (raw.empty()) {
     p.error = L"Keine Ziele angegeben.";
+    return p;
+  }
+  if (raw.size() > max_operation_targets) {
+    p.error = L"Zu viele Ziele; maximal " +
+              std::to_wstring(max_operation_targets) +
+              L" Ziele pro Vorgang sind zulässig.";
     return p;
   }
   path_validator v;
@@ -208,7 +227,41 @@ std::wstring format_prepared_analysis(const prepared_operation &p) {
 }
 bool requires_typed_confirmation(const file_analysis &a) {
   constexpr std::uint64_t gib = 1024ull * 1024ull * 1024ull;
-  return a.files > 100 || a.logical_bytes >= gib || a.directories > 50;
+  return a.files > 100 || a.logical_bytes >= gib || a.directories > 50 ||
+         a.inaccessible_entries != 0;
+}
+bool requires_hardlink_confirmation(const erase_options &options) {
+  return options.hardlinks == hardlink_policy::overwrite_shared_content;
+}
+std::vector<std::wstring> build_elevation_arguments(
+    const erase_options &options,
+    const std::vector<std::filesystem::path> &targets) {
+  std::vector<std::wstring> result{L"--elevated-retry"};
+  switch (options.mode) {
+  case erase_mode::fast: result.push_back(L"--fast"); break;
+  case erase_mode::strong: result.push_back(L"--strong"); break;
+  case erase_mode::dod_5220_22_m: result.push_back(L"--dod"); break;
+  case erase_mode::nist_800_88: result.push_back(L"--nist"); break;
+  case erase_mode::bsi_gs: result.push_back(L"--bsi"); break;
+  case erase_mode::gutmann: result.push_back(L"--gutmann"); break;
+  case erase_mode::standard:
+  default: result.push_back(L"--standard"); break;
+  }
+  if (!options.verify)
+    result.push_back(L"--no-verify");
+  if (!options.erase_alternate_streams)
+    result.push_back(L"--no-ads");
+  if (!options.rename_before_delete)
+    result.push_back(L"--no-rename");
+  result.push_back(L"--rename-rounds");
+  result.push_back(std::to_wstring((std::min)(options.rename_rounds, 32u)));
+  if (options.hardlinks == hardlink_policy::delete_link_only)
+    result.push_back(L"--hardlink-delete-name");
+  else if (options.hardlinks == hardlink_policy::overwrite_shared_content)
+    result.push_back(L"--hardlink-overwrite-shared");
+  for (const auto &target : targets)
+    result.push_back(target.wstring());
+  return result;
 }
 std::wstring confirmation_text(const prepared_operation &p,
                                const erase_options &o) {
@@ -227,6 +280,11 @@ std::wstring confirmation_text(const prepared_operation &p,
     << L"\nVerifikation: " << (o.verify ? L"aktiv" : L"deaktiviert")
     << L"\nHardlinks: " << hp(o.hardlinks) << L"\nRename-Runden: "
     << o.rename_rounds << L"\n";
+  if (p.analysis.inaccessible_entries)
+    x << L"\nWARNUNG: Die Voranalyse war unvollständig. Deshalb ist die "
+         L"stärkere Texteingabe-Bestätigung erforderlich; die Löschengine "
+         L"arbeitet bei Zugriffs- oder Aufzählungsfehlern weiterhin "
+         L"fail-closed.\n";
   bool ssd = false, shadow = false, usn = false;
   for (const auto &s : p.storage) {
     ssd |= s.kind == media_kind::solid_state;
@@ -257,24 +315,33 @@ gui_run_result execute_prepared_operation(const prepared_operation &p,
   analyzer a;
   std::uint64_t fd = 0, dd = 0, bw = 0, ads = 0, rp = 0, hb = 0;
   std::size_t wc = 0;
-  bool all = true, denied = false;
+  bool all = true, denied = false, audit_failed = false,
+       analysis_failed = false;
   std::vector<std::wstring> locks;
   auto logical = sadd(
            p.analysis.logical_bytes,
            o.erase_alternate_streams ? p.analysis.alternate_stream_bytes : 0),
        expected = smul(logical, pc(o.mode));
   for (std::size_t i = 0; i < p.targets.size(); ++i) {
-    if (cancel && cancel()) {
+    if (cancellation_requested(cancel)) {
       out.cancelled = true;
       out.exit_code = 130;
       out.summary = L"Abgebrochen.";
       return out;
     }
-    auto per = a.analyze(p.targets[i]);
+    file_analysis per;
+    try {
+      per = a.analyze(p.targets[i]);
+    } catch (...) {
+      all = false;
+      analysis_failed = true;
+      wc = wc == (std::numeric_limits<std::size_t>::max)() ? wc : wc + 1u;
+      break;
+    }
     auto start = std::chrono::steady_clock::now();
     auto before = bw;
     progress_callback wrap = [&](const progress_info &info) {
-      if (cancel && cancel())
+      if (cancellation_requested(cancel))
         return false;
       if (!cb)
         return true;
@@ -287,32 +354,54 @@ gui_run_result execute_prepared_operation(const prepared_operation &p,
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - start)
                   .count();
-    operation_audit ar;
-    ar.operation_id = create_operation_id();
-    ar.target = p.targets[i];
-    if (i < p.storage.size())
-      ar.storage = p.storage[i];
-    ar.options = o;
-    ar.analysis = per;
-    ar.result = r;
-    ar.duration_ms = ms > 0 ? static_cast<std::uint64_t>(ms) : 0;
-    const bool audit_ok = !write_audit_record(ar).empty();
-    fd += r.files_deleted;
-    dd += r.directories_deleted;
-    bw += r.bytes_written;
-    ads += r.alternate_streams_overwritten;
-    rp += r.reparse_points_removed;
-    hb += r.hardlinks_blocked;
-    wc += r.warnings.size() + (audit_ok ? 0u : 1u);
+    bool audit_ok = false;
+    try {
+      operation_audit ar;
+      ar.operation_id = create_operation_id();
+      ar.target = p.targets[i];
+      if (i < p.storage.size())
+        ar.storage = p.storage[i];
+      ar.options = o;
+      ar.analysis = per;
+      ar.result = r;
+      ar.duration_ms = ms > 0 ? static_cast<std::uint64_t>(ms) : 0;
+      audit_ok = !write_audit_record(ar).empty();
+    } catch (...) {
+      audit_ok = false;
+    }
+    fd = sadd(fd, r.files_deleted);
+    dd = sadd(dd, r.directories_deleted);
+    bw = sadd(bw, r.bytes_written);
+    ads = sadd(ads, r.alternate_streams_overwritten);
+    rp = sadd(rp, r.reparse_points_removed);
+    hb = sadd(hb, r.hardlinks_blocked);
+    auto warning_increment = r.warnings.size();
+    if (!audit_ok &&
+        warning_increment != (std::numeric_limits<std::size_t>::max)())
+      ++warning_increment;
+    wc = warning_increment > (std::numeric_limits<std::size_t>::max)() - wc
+             ? (std::numeric_limits<std::size_t>::max)()
+             : wc + warning_increment;
     all &= r.success && audit_ok;
     denied |= r.win32_error == ERROR_ACCESS_DENIED;
-    if (!r.lock_owners.empty())
-      locks.push_back(p.targets[i].wstring() + L"\n" +
-                      format_lock_owners(r.lock_owners));
+    try {
+      if (!r.success && r.win32_error == ERROR_ACCESS_DENIED)
+        out.elevation_retry_targets.push_back(p.targets[i]);
+      if (!r.lock_owners.empty())
+        locks.push_back(p.targets[i].wstring() + L"\n" +
+                        format_lock_owners(r.lock_owners));
+    } catch (...) {
+      all = false;
+      wc = wc == (std::numeric_limits<std::size_t>::max)() ? wc : wc + 1u;
+    }
     if (r.cancelled) {
       out.cancelled = true;
       out.exit_code = 130;
       all = false;
+      break;
+    }
+    if (!audit_ok) {
+      audit_failed = true;
       break;
     }
   }
@@ -323,7 +412,13 @@ gui_run_result execute_prepared_operation(const prepared_operation &p,
     << L"Dateien gelöscht: " << fd << L"\nVerzeichnisse gelöscht: " << dd
     << L"\nGeschriebene Bytes: " << bw << L"\nADS überschrieben: " << ads
     << L"\nReparse Points entfernt: " << rp << L"\nHardlinks blockiert: " << hb
-    << L"\nWarnungen: " << wc << L"\nAudit: " << audit_directory().wstring();
+    << L"\nWarnungen: " << wc << L"\nAudit: " << audit_directory().wstring()
+    << L"\nAuditstatus: "
+    << (audit_failed   ? L"FEHLER – weitere Ziele gestoppt"
+        : analysis_failed ? L"UNVOLLSTÄNDIG – Ziel nicht bearbeitet"
+                          : L"OK");
+  if (analysis_failed)
+    s << L"\nVoranalyse: FEHLER – aktuelles und weitere Ziele nicht bearbeitet";
   for (const auto &l : locks)
     s << L"\n\n" << l;
   out.completed = !out.cancelled;

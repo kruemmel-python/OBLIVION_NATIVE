@@ -4,8 +4,20 @@
 param()
 
 try {
-    Get-AppxPackage -Name "OblivionNative.ShellExtension" | Remove-AppxPackage -ErrorAction SilentlyContinue
-    Write-Host "[OK] Windows 11 Kontextmenue-Paket erfolgreich entfernt." -ForegroundColor Green
+    $packages = @(Get-AppxPackage -Name "OblivionNative.ShellExtension" -ErrorAction Stop)
+    if ($packages.Count -eq 0) {
+        Write-Host "[OK] Windows 11 Kontextmenue-Paket ist nicht installiert." -ForegroundColor Green
+        exit 0
+    }
+
+    $packages | Remove-AppxPackage -ErrorAction Stop
+    $remaining = @(Get-AppxPackage -Name "OblivionNative.ShellExtension" -ErrorAction Stop)
+    if ($remaining.Count -ne 0) {
+        throw "Das Windows 11 Kontextmenue-Paket ist nach der Deinstallation weiterhin registriert."
+    }
+
+    Write-Host "[OK] Windows 11 Kontextmenue-Paket erfolgreich entfernt und Endzustand verifiziert." -ForegroundColor Green
 } catch {
-    Write-Warning "Entfernen fehlgeschlagen: $_"
+    Write-Error "Entfernen fehlgeschlagen: $_"
+    exit 1
 }

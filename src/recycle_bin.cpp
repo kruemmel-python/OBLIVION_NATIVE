@@ -3,7 +3,11 @@
 
 #include <Windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <algorithm>
+#include <iterator>
+#include <limits>
+#include <new>
 #include <string>
 #ifdef OBLIVION_TESTING
 #include "oblivion/test_hooks.hpp"
@@ -11,7 +15,43 @@
 
 namespace oblivion {
 
-recycle_bin_scan_result scan_recycle_bin_items() {
+namespace {
+constexpr std::size_t max_recycle_items = 100000u;
+std::uint64_t saturating_add(const std::uint64_t left,
+                             const std::uint64_t right) noexcept {
+  const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+  return right > maximum - left ? maximum : left + right;
+}
+void merge_result(erase_result &target, const erase_result &source) {
+  target.files_deleted =
+      saturating_add(target.files_deleted, source.files_deleted);
+  target.directories_deleted =
+      saturating_add(target.directories_deleted, source.directories_deleted);
+  target.bytes_written =
+      saturating_add(target.bytes_written, source.bytes_written);
+  target.alternate_streams_overwritten = saturating_add(
+      target.alternate_streams_overwritten, source.alternate_streams_overwritten);
+  target.reparse_points_removed = saturating_add(
+      target.reparse_points_removed, source.reparse_points_removed);
+  target.hardlinks_blocked =
+      saturating_add(target.hardlinks_blocked, source.hardlinks_blocked);
+  if (target.win32_error == ERROR_SUCCESS)
+    target.win32_error = source.win32_error;
+  constexpr std::size_t max_diagnostics = 256u;
+  for (const auto &warning : source.warnings) {
+    if (target.warnings.size() >= max_diagnostics)
+      break;
+    target.warnings.push_back(warning);
+  }
+  for (const auto &owner : source.lock_owners) {
+    if (target.lock_owners.size() >= max_diagnostics)
+      break;
+    target.lock_owners.push_back(owner);
+  }
+}
+}
+
+recycle_bin_scan_result scan_recycle_bin_items() noexcept try {
   recycle_bin_scan_result result;
 
   const auto fail = [&result](const std::error_code &ec) {
@@ -27,6 +67,8 @@ recycle_bin_scan_result scan_recycle_bin_items() {
     return result;
   }
   for (int d = 0; d < 26; ++d) {
+    if (!result.complete)
+      break;
     if ((drive_mask & (1 << d)) == 0)
       continue;
 
@@ -34,12 +76,31 @@ recycle_bin_scan_result scan_recycle_bin_items() {
     const UINT drive_type = GetDriveTypeW(root);
     if (drive_type != DRIVE_FIXED && drive_type != DRIVE_REMOVABLE)
       continue;
+    wchar_t volume_name[1024]{};
+    if (!GetVolumeNameForVolumeMountPointW(root, volume_name,
+                                           static_cast<DWORD>(std::size(volume_name)))) {
+      result.complete = false;
+      result.win32_error = GetLastError();
+      continue;
+    }
+    result.scanned_roots.emplace_back(root);
+    result.scanned_volumes.emplace_back(volume_name);
 
     const auto bin_path = std::filesystem::path{root} / L"$Recycle.Bin";
     std::error_code ec;
     if (!std::filesystem::exists(bin_path, ec)) {
       if (ec)
         fail(ec);
+      continue;
+    }
+    const DWORD bin_attributes = GetFileAttributesW(bin_path.c_str());
+    if (bin_attributes == INVALID_FILE_ATTRIBUTES ||
+        (bin_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (bin_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      result.complete = false;
+      result.win32_error = bin_attributes == INVALID_FILE_ATTRIBUTES
+                               ? GetLastError()
+                               : ERROR_REPARSE_TAG_INVALID;
       continue;
     }
 
@@ -51,11 +112,19 @@ recycle_bin_scan_result scan_recycle_bin_items() {
       continue;
     }
     while (sid_it != end_it) {
-      const bool is_directory = sid_it->is_directory(ec);
-      if (ec) {
-        fail(ec);
+      const DWORD sid_attributes = GetFileAttributesW(sid_it->path().c_str());
+      if (sid_attributes == INVALID_FILE_ATTRIBUTES) {
+        result.complete = false;
+        result.win32_error = GetLastError();
         break;
       }
+      if ((sid_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        result.complete = false;
+        result.win32_error = ERROR_REPARSE_TAG_INVALID;
+        break;
+      }
+      const bool is_directory =
+          (sid_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
       // Finde darin alle $R* (Nutzdaten) und $I* (Indexdateien), ohne desktop.ini
       if (is_directory) {
         std::filesystem::directory_iterator item_it(sid_it->path(), ec), item_end;
@@ -64,8 +133,15 @@ recycle_bin_scan_result scan_recycle_bin_items() {
           break;
         }
         while (item_it != item_end) {
-          if (_wcsicmp(item_it->path().filename().c_str(), L"desktop.ini") != 0)
+          if (_wcsicmp(item_it->path().filename().c_str(), L"desktop.ini") !=
+              0) {
+            if (result.items.size() >= max_recycle_items) {
+              result.complete = false;
+              result.win32_error = ERROR_TOO_MANY_NAMES;
+              break;
+            }
             result.items.push_back(item_it->path());
+          }
           item_it.increment(ec);
           if (ec) {
             fail(ec);
@@ -74,6 +150,11 @@ recycle_bin_scan_result scan_recycle_bin_items() {
         }
         if (!result.complete)
           break;
+      } else if (_wcsicmp(sid_it->path().filename().c_str(), L"desktop.ini") !=
+                 0) {
+        result.complete = false;
+        result.win32_error = ERROR_INVALID_DATA;
+        break;
       }
       sid_it.increment(ec);
       if (ec) {
@@ -84,15 +165,32 @@ recycle_bin_scan_result scan_recycle_bin_items() {
   }
 
   return result;
+} catch (const std::bad_alloc &) {
+  recycle_bin_scan_result result;
+  result.complete = false;
+  result.win32_error = ERROR_NOT_ENOUGH_MEMORY;
+  return result;
+} catch (...) {
+  recycle_bin_scan_result result;
+  result.complete = false;
+  result.win32_error = ERROR_UNHANDLED_EXCEPTION;
+  return result;
 }
 
-std::vector<std::filesystem::path> find_recycle_bin_items() {
+std::vector<std::filesystem::path> find_recycle_bin_items() noexcept {
   return scan_recycle_bin_items().items;
 }
 
 erase_result secure_empty_recycle_bin(
     const erase_options &options,
-    const progress_callback &callback) {
+    const progress_callback &callback) noexcept {
+  erase_result result{};
+  try {
+  if (!valid_erase_options(options)) {
+    result.win32_error = ERROR_INVALID_PARAMETER;
+    result.message = L"Ungültige oder unbeschränkte Engine-Optionen.";
+    return result;
+  }
 #ifdef OBLIVION_TESTING
   const auto scan = testing::hooks().recycle_scan
                         ? testing::hooks().recycle_scan()
@@ -101,17 +199,15 @@ erase_result secure_empty_recycle_bin(
   const auto scan = scan_recycle_bin_items();
 #endif
   if (!scan.complete) {
-    erase_result r{};
-    r.win32_error = scan.win32_error;
-    r.message = L"Papierkorb-Aufzählung unvollständig; reguläre Windows-"
-                L"Bereinigung wurde zum Schutz vor unüberschriebenem Löschen "
-                L"nicht ausgeführt.";
-    return r;
+    result.win32_error = scan.win32_error;
+    result.message = L"Papierkorb-Aufzählung unvollständig; reguläre Windows-"
+                     L"Bereinigung wurde zum Schutz vor unüberschriebenem "
+                     L"Löschen nicht ausgeführt.";
+    return result;
   }
   const auto &items = scan.items;
 
   // Sicheres Überschreiben aller im Papierkorb befindlichen Objekte
-  erase_result result{};
   result.success = true;
   erase_engine engine;
   for (const auto &item : items) {
@@ -140,6 +236,7 @@ erase_result secure_empty_recycle_bin(
 #else
     const auto r = engine.erase_recycle_bin_item(item, options, callback);
 #endif
+    merge_result(result, r);
     if (r.cancelled) {
       result.success = false;
       result.cancelled = true;
@@ -150,14 +247,11 @@ erase_result secure_empty_recycle_bin(
       result.success = false;
       result.message = r.message;
     }
-    result.files_deleted += r.files_deleted;
-    result.directories_deleted += r.directories_deleted;
-    result.bytes_written += r.bytes_written;
   }
 
-  // A second complete scan closes the interval between enumeration and the
-  // shell operation.  Objects that appeared meanwhile must never be deleted
-  // by SHEmptyRecycleBinW without having been overwritten first.
+  // A second complete scan detects objects that appeared during overwriting.
+  // No destructive shell API is called afterwards: such an API would reopen
+  // a race in which a newly recycled, unoverwritten object could be deleted.
   if (result.success && !result.cancelled) {
 #ifdef OBLIVION_TESTING
     const auto pre_shell_scan = testing::hooks().recycle_scan
@@ -166,11 +260,26 @@ erase_result secure_empty_recycle_bin(
 #else
     const auto pre_shell_scan = scan_recycle_bin_items();
 #endif
-    if (!pre_shell_scan.complete || !pre_shell_scan.items.empty()) {
+    const auto same_path = [](const std::filesystem::path &left,
+                              const std::filesystem::path &right) {
+      return CompareStringOrdinal(left.c_str(), -1, right.c_str(), -1, TRUE) ==
+             CSTR_EQUAL;
+    };
+    const bool same_volume_map =
+        pre_shell_scan.scanned_roots.size() == scan.scanned_roots.size() &&
+        pre_shell_scan.scanned_volumes.size() == scan.scanned_volumes.size() &&
+        pre_shell_scan.scanned_roots.size() == scan.scanned_volumes.size() &&
+        std::equal(scan.scanned_roots.begin(), scan.scanned_roots.end(),
+                   pre_shell_scan.scanned_roots.begin(), same_path) &&
+        std::equal(scan.scanned_volumes.begin(), scan.scanned_volumes.end(),
+                   pre_shell_scan.scanned_volumes.begin(), same_path);
+    if (!pre_shell_scan.complete || !pre_shell_scan.items.empty() ||
+        !same_volume_map) {
       result.success = false;
-      result.win32_error = pre_shell_scan.complete
-                               ? ERROR_DIR_NOT_EMPTY
-                               : pre_shell_scan.win32_error;
+      result.win32_error = !pre_shell_scan.complete
+                               ? pre_shell_scan.win32_error
+                               : (!same_volume_map ? ERROR_MEDIA_CHANGED
+                                                   : ERROR_DIR_NOT_EMPTY);
       result.message = L"Papierkorb hat sich während der sicheren "
                        L"Verarbeitung geändert oder konnte nicht vollständig "
                        L"erneut aufgezählt werden; reguläre Windows-"
@@ -178,50 +287,53 @@ erase_result secure_empty_recycle_bin(
     }
   }
 
-  // Nur wenn alle Papierkorb-Objekte ohne Abbruch/Fehler sicher überschrieben
-  // wurden und der erneute Scan leer und vollständig ist, den
-  // Windows-Papierkorbindex bereinigen.
+  // OBLIVION removes the enumerated $R/$I objects itself.  Notify Explorer of
+  // the filesystem change, then query every scanned volume separately.  The
+  // notification is non-destructive; a concurrently added object remains
+  // intact and makes the final verification fail instead of being deleted.
   if (result.success && !result.cancelled) {
-#ifdef OBLIVION_TESTING
-    const auto empty = testing::hooks().recycle_empty
-                           ? testing::hooks().recycle_empty
-                           : SHEmptyRecycleBinW;
-#else
-    const auto empty = SHEmptyRecycleBinW;
+#ifndef OBLIVION_TESTING
+    for (const auto &root : scan.scanned_roots) {
+      const auto recycle_directory = root / L"$Recycle.Bin";
+      SHChangeNotify(SHCNE_UPDATEDIR,
+                     SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                     recycle_directory.c_str(), nullptr);
+    }
 #endif
-    const HRESULT empty_result = empty(nullptr, nullptr,
-                                       SHERB_NOCONFIRMATION |
-                                           SHERB_NOPROGRESSUI | SHERB_NOSOUND);
-    if (FAILED(empty_result)) {
-      result.success = false;
-      result.win32_error = HRESULT_CODE(empty_result);
-      result.message = L"Windows-Papierkorbindex konnte nach dem sicheren "
-                       L"Überschreiben nicht bereinigt werden.";
-    } else {
+#ifdef OBLIVION_TESTING
+    const auto query = testing::hooks().recycle_query
+                           ? testing::hooks().recycle_query
+                           : SHQueryRecycleBinW;
+#else
+    const auto query = SHQueryRecycleBinW;
+#endif
+    std::int64_t remaining_items = 0;
+    for (const auto &root : scan.scanned_roots) {
       SHQUERYRBINFO query_info{};
       query_info.cbSize = sizeof(query_info);
-#ifdef OBLIVION_TESTING
-      const auto query = testing::hooks().recycle_query
-                             ? testing::hooks().recycle_query
-                             : SHQueryRecycleBinW;
-#else
-      const auto query = SHQueryRecycleBinW;
-#endif
-      const HRESULT query_result = query(nullptr, &query_info);
+      const HRESULT query_result = query(root.c_str(), &query_info);
       if (FAILED(query_result)) {
         result.success = false;
         result.win32_error = HRESULT_CODE(query_result);
-        result.message = L"Sicheres Überschreiben und Windows-Bereinigung "
-                         L"waren erfolgreich, aber der Papierkorb-Endzustand "
-                         L"konnte nicht verifiziert werden.";
+        result.message = L"Die erfassten Papierkorbobjekte wurden sicher "
+                         L"entfernt, aber der Endzustand konnte nicht für "
+                         L"alle Volumes verifiziert werden.";
+        break;
+      } else if (query_info.i64NumItems < 0) {
+        result.success = false;
+        result.win32_error = ERROR_INVALID_DATA;
+        result.message = L"Die Windows-Papierkorbabfrage lieferte einen "
+                         L"ungültigen Endzustand.";
+        break;
       } else if (query_info.i64NumItems != 0) {
         result.success = false;
         result.win32_error = ERROR_DIR_NOT_EMPTY;
-        result.message = L"Sicheres Überschreiben und Windows-Bereinigung "
-                         L"waren erfolgreich, aber der Papierkorb enthält " +
-                         std::to_wstring(query_info.i64NumItems) +
-                         L" verbleibende Objekte.";
-      } else if (items.empty()) {
+        remaining_items = query_info.i64NumItems;
+        break;
+      }
+    }
+    if (result.success) {
+      if (items.empty()) {
         result.message = L"Papierkorb ist leer (Endzustand verifiziert).";
       } else {
         result.message =
@@ -229,6 +341,13 @@ erase_result secure_empty_recycle_bin(
             std::to_wstring(result.files_deleted) + L" Dateien, " +
             std::to_wstring(result.directories_deleted) + L" Ordner vernichtet).";
       }
+    } else if (result.win32_error == ERROR_DIR_NOT_EMPTY) {
+      result.message =
+          L"Die erfassten Papierkorbobjekte wurden sicher entfernt, aber "
+          L"mindestens ein Volume enthält " +
+          std::to_wstring(remaining_items) +
+          L" neues oder verbleibendes Objekt; es wurde nicht durch eine "
+          L"destruktive Shell-Bereinigung gelöscht.";
     }
   } else if (!result.cancelled && result.message.empty()) {
     result.message =
@@ -236,6 +355,17 @@ erase_result secure_empty_recycle_bin(
         L"wurde zum Schutz vor unüberschriebenem Löschen ausgesetzt.";
   }
   return result;
+  } catch (const std::bad_alloc &) {
+    result.success = false;
+    if (result.win32_error == ERROR_SUCCESS)
+      result.win32_error = ERROR_NOT_ENOUGH_MEMORY;
+    return result;
+  } catch (...) {
+    result.success = false;
+    if (result.win32_error == ERROR_SUCCESS)
+      result.win32_error = ERROR_UNHANDLED_EXCEPTION;
+    return result;
+  }
 }
 
 } // namespace oblivion

@@ -14,6 +14,7 @@
 #include "oblivion/ui_icons.hpp"
 #include <CommCtrl.h>
 #include <Windows.h>
+#include <exception>
 #include <filesystem>
 #include <iterator>
 #include <shellapi.h>
@@ -30,9 +31,26 @@ std::filesystem::path exe() {
   b.resize(n);
   return b;
 }
+bool parse_rename_rounds(const std::wstring_view value,
+                         unsigned &rounds) noexcept try {
+  std::size_t consumed = 0;
+  const auto parsed = std::stoul(std::wstring{value}, &consumed);
+  if (consumed != value.size() || parsed > 32u)
+    return false;
+  rounds = static_cast<unsigned>(parsed);
+  return true;
+} catch (...) {
+  return false;
+}
 bool hardlinks(erase_options &o, const file_analysis &a) {
-  if (!a.hardlinked_files)
+  if (!a.hardlinked_files && !requires_hardlink_confirmation(o))
     return true;
+  if (!a.hardlinked_files)
+    return typed_confirmation(
+        L"Hardlink Shared Content",
+        L"Die gefährliche Shared-Hardlink-Strategie bleibt auch dann aktiv, "
+        L"wenn Hardlinks erst nach der Voranalyse entstehen.",
+        L"HARDLINK");
   constexpr int BLOCK = 4101, DEL = 4102, OVER = 4103;
   TASKDIALOG_BUTTON bs[] = {
       {BLOCK, L"Blockieren"},
@@ -48,7 +66,7 @@ bool hardlinks(erase_options &o, const file_analysis &a) {
   c.pszMainInstruction = L"Hardlink-Strategie wählen";
   c.pszContent =
       L"Mehrere Namen können denselben Dateidatensatz referenzieren.";
-  c.cButtons = 3;
+  c.cButtons = shared_hardlink_overwrite_allowed() ? 3u : 2u;
   c.pButtons = bs;
   c.nDefaultButton =
       o.hardlinks == hardlink_policy::delete_link_only ? DEL : BLOCK;
@@ -76,22 +94,7 @@ bool hardlinks(erase_options &o, const file_analysis &a) {
 std::vector<std::wstring> elevation_args(
     const erase_options &options,
     const std::vector<std::filesystem::path> &targets) {
-  std::vector<std::wstring> result{L"--elevated-retry"};
-  switch (options.mode) {
-  case erase_mode::fast: result.push_back(L"--fast"); break;
-  case erase_mode::strong: result.push_back(L"--strong"); break;
-  case erase_mode::dod_5220_22_m: result.push_back(L"--dod"); break;
-  case erase_mode::nist_800_88: result.push_back(L"--nist"); break;
-  case erase_mode::bsi_gs: result.push_back(L"--bsi"); break;
-  case erase_mode::gutmann: result.push_back(L"--gutmann"); break;
-  case erase_mode::standard:
-  default: result.push_back(L"--standard"); break;
-  }
-  if (!options.verify)
-    result.push_back(L"--no-verify");
-  for (const auto &target : targets)
-    result.push_back(target.wstring());
-  return result;
+  return build_elevation_arguments(options, targets);
 }
 
 bool show_settings_singleton() {
@@ -137,7 +140,8 @@ int oblivion_message_box(HWND owner, LPCWSTR text, LPCWSTR caption,
 
 #define MessageBoxW oblivion_message_box
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ PWSTR,
+                    _In_ int) try {
   using namespace oblivion;
   const auto hardening = harden_current_process();
   int argc = 0;
@@ -189,7 +193,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   if (first == L"--empty-recycle-bin") {
     const int btn = MessageBoxW(
         nullptr,
-        L"Möchten Sie alle Dateien im Windows-Papierkorb aller Laufwerke "
+        L"Möchten Sie alle Dateien im Windows-Papierkorb aller unterstützten "
+        L"lokalen Laufwerke "
         L"unwiderruflich und sicher überschreiben?",
         L"Oblivion · Papierkorb sicher leeren",
         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
@@ -257,8 +262,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     out_file.replace_extension(L".html");
     const bool ok = generate_certificate_from_audit(audit_file, out_file);
     if (ok) {
-      ShellExecuteW(nullptr, L"open", out_file.c_str(), nullptr, nullptr,
-                    SW_SHOWNORMAL);
+      const auto opened = ShellExecuteW(nullptr, L"open", out_file.c_str(),
+                                        nullptr, nullptr, SW_SHOWNORMAL);
+      if (reinterpret_cast<INT_PTR>(opened) <= 32)
+        MessageBoxW(nullptr,
+                    L"Zertifikat wurde erstellt, konnte aber nicht im "
+                    L"Standardbrowser geöffnet werden.",
+                    L"Oblivion", MB_OK | MB_ICONWARNING);
     } else {
       MessageBoxW(nullptr, L"Zertifikat konnte nicht generiert werden.",
                   L"Oblivion", MB_OK | MB_ICONERROR);
@@ -337,6 +347,24 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
       o.verify = true;
     } else if (a == L"--no-verify")
       o.verify = false;
+    else if (a == L"--no-ads")
+      o.erase_alternate_streams = false;
+    else if (a == L"--no-rename")
+      o.rename_before_delete = false;
+    else if (a == L"--rename-rounds") {
+      if (i + 1 >= argc || !parse_rename_rounds(argv[++i], o.rename_rounds)) {
+        MessageBoxW(nullptr, L"Ungültige Rename-Runden.", L"Oblivion",
+                    MB_OK | MB_ICONERROR);
+        LocalFree(argv);
+        return 1;
+      }
+    }
+    else if (a == L"--hardlink-block")
+      o.hardlinks = hardlink_policy::block;
+    else if (a == L"--hardlink-delete-name")
+      o.hardlinks = hardlink_policy::delete_link_only;
+    else if (a == L"--hardlink-overwrite-shared")
+      o.hardlinks = hardlink_policy::overwrite_shared_content;
     else if (a == L"--elevated-retry")
       elev = true;
     else if (a.starts_with(L"--")) {
@@ -352,6 +380,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     LocalFree(argv);
     return 1;
   }
+  apply_security_policy(o);
   auto p = prepare_operation(targets);
   if (!p.valid) {
     MessageBoxW(nullptr, p.error.c_str(), L"Oblivion - blockiert",
@@ -396,13 +425,35 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   MessageBoxW(nullptr, r.summary.c_str(), L"Oblivion",
               MB_OK | (r.exit_code == 0 ? MB_ICONINFORMATION : MB_ICONWARNING) |
                   MB_SYSTEMMODAL);
-  if (r.exit_code == 5 && !elev && !is_process_elevated() &&
+  if (r.exit_code == 5 && !elev && !r.elevation_retry_targets.empty() &&
+      !is_process_elevated() &&
       MessageBoxW(
           nullptr,
           L"Zugriff verweigert. Mit Administratorrechten erneut versuchen?",
-          L"Oblivion", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES)
-    (void)relaunch_elevated(exe(), elevation_args(o, p.targets));
+          L"Oblivion", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+    if (!relaunch_elevated(exe(),
+                           elevation_args(o, r.elevation_retry_targets))) {
+      MessageBoxW(nullptr,
+                  L"Der Neustart mit Administratorrechten ist fehlgeschlagen "
+                  L"oder wurde abgebrochen.",
+                  L"Oblivion", MB_OK | MB_ICONERROR);
+    } else {
+      LocalFree(argv);
+      return 0;
+    }
+  }
   int ec = r.exit_code;
   LocalFree(argv);
   return ec;
+} catch (const std::exception &) {
+  MessageBoxW(nullptr,
+              L"OBLIVION wurde wegen einer unerwarteten C++-Ausnahme sicher "
+              L"beendet.",
+              L"Oblivion", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+  return 10;
+} catch (...) {
+  MessageBoxW(nullptr, L"OBLIVION wurde wegen einer unbekannten Ausnahme "
+                       L"sicher beendet.",
+              L"Oblivion", MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+  return 10;
 }

@@ -1,5 +1,11 @@
-$Root = Join-Path $env:TEMP 'OBLIVION_SAFE_TEST'
-$Sentinel = Join-Path (Join-Path $env:TEMP 'OBLIVION_EXTERNAL_GUARD') 'DO_NOT_DELETE.txt'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$External
+)
+$Root = [IO.Path]::GetFullPath($Root)
+$External = [IO.Path]::GetFullPath($External)
+$Sentinel = Join-Path $External 'DO_NOT_DELETE.txt'
 $RootGone = -not (Test-Path -LiteralPath $Root)
 $GuardAlive = Test-Path -LiteralPath $Sentinel
 Write-Host "Testziel entfernt:       $RootGone"

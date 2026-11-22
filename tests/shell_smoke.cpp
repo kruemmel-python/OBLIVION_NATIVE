@@ -1,14 +1,17 @@
 #include "oblivion/shell_batch.hpp"
+#include "oblivion/win_handle.hpp"
 
 #include <Windows.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cwctype>
 #include <filesystem>
 #include <future>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -66,6 +69,49 @@ int wmain() {
   std::ranges::sort(wanted);
   if (actual != wanted)
     return fail("Shell-Batch hat ein falsches Ziel uebergeben.", 5);
+
+  DWORD session = 0;
+  if (!ProcessIdToSessionId(GetCurrentProcessId(), &session))
+    return fail("Sitzung fuer Timeout-Test nicht bestimmbar.", 6);
+  const std::wstring stalled_name =
+      L"\\\\.\\pipe\\Oblivion.ShellBatch." + std::to_wstring(session) +
+      L".Analyze";
+  auto stalled_owner = std::async(std::launch::async, [&] {
+    return collect_shell_batch(shell_batch_action::analyze,
+                               root / L"owner-target.bin", 100, 1500);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  unique_win_handle stalled_client;
+  for (unsigned attempt = 0; attempt < 20 && !stalled_client; ++attempt) {
+    stalled_client.reset(CreateFileW(stalled_name.c_str(), GENERIC_WRITE, 0,
+                                     nullptr, OPEN_EXISTING, 0, nullptr));
+    if (!stalled_client)
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  if (!stalled_client)
+    return fail("Timeout-Test-Client konnte nicht verbinden.", 7);
+  const std::uint32_t slow_count = 4;
+  DWORD written = 0;
+  if (!WriteFile(stalled_client.get(), &slow_count, sizeof(slow_count),
+                 &written, nullptr) ||
+      written != sizeof(slow_count))
+    return fail("Timeout-Test-Header konnte nicht gesendet werden.", 8);
+  const auto timeout_start = std::chrono::steady_clock::now();
+  for (const wchar_t character : std::wstring_view{L"ABCD"}) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    written = 0;
+    if (!WriteFile(stalled_client.get(), &character, sizeof(character),
+                   &written, nullptr) ||
+        written != sizeof(character))
+      break;
+  }
+  stalled_client.reset();
+  const auto stalled = stalled_owner.get();
+  const auto timeout_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::steady_clock::now() - timeout_start);
+  if (!stalled.success || !stalled.owner || stalled.targets.size() != 1u ||
+      timeout_elapsed >= std::chrono::seconds(3))
+    return fail("Partieller Pipe-Transfer respektiert keine Gesamtfrist.", 9);
 
   std::cout << "Statische Windows-Shell-Aufrufe werden zu einer nativen "
                "OBLIVION-Mehrfachoperation gebuendelt.\n";

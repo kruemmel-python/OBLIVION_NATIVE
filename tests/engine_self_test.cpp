@@ -3,6 +3,7 @@
 #include "oblivion/audit.hpp"
 #include "oblivion/audit_integrity.hpp"
 #include "oblivion/erase_engine.hpp"
+#include "oblivion/path_validator.hpp"
 #include "oblivion/certificate.hpp"
 #include "oblivion/runtime_guard.hpp"
 #include "oblivion/secure_memory.hpp"
@@ -11,12 +12,14 @@
 #include "oblivion/wipe_free_space.hpp"
 
 #include <Windows.h>
+#include <ShlObj.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -40,29 +43,34 @@ private:
   std::filesystem::path path_;
 };
 
-class local_appdata_guard final {
+class environment_variable_guard final {
 public:
-  explicit local_appdata_guard(const std::filesystem::path &replacement) {
-    const DWORD size = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
-    if (size > 0) {
+  environment_variable_guard(const wchar_t *name, const wchar_t *replacement)
+      : name_(name) {
+    const DWORD size = GetEnvironmentVariableW(name_.c_str(), nullptr, 0);
+    existed_ = size != 0;
+    if (existed_) {
       previous_.resize(size);
-      const DWORD written =
-          GetEnvironmentVariableW(L"LOCALAPPDATA", previous_.data(), size);
-      if (written > 0 && written < size)
-        previous_.resize(written);
+      const DWORD written = GetEnvironmentVariableW(
+          name_.c_str(), previous_.data(), static_cast<DWORD>(previous_.size()));
+      if (written == 0 || static_cast<std::size_t>(written) >= previous_.size())
+        return;
+      previous_.resize(written);
     }
     changed_ =
-        SetEnvironmentVariableW(L"LOCALAPPDATA", replacement.c_str()) != FALSE;
+        SetEnvironmentVariableW(name_.c_str(), replacement) != FALSE;
   }
-  ~local_appdata_guard() {
+  ~environment_variable_guard() {
     if (changed_)
-      SetEnvironmentVariableW(L"LOCALAPPDATA",
-                              previous_.empty() ? nullptr : previous_.c_str());
+      (void)SetEnvironmentVariableW(
+          name_.c_str(), existed_ ? previous_.c_str() : nullptr);
   }
-  [[nodiscard]] bool changed() const { return changed_; }
+  [[nodiscard]] bool changed() const noexcept { return changed_; }
 
 private:
+  std::wstring name_;
   std::wstring previous_;
+  bool existed_{false};
   bool changed_{false};
 };
 
@@ -80,6 +88,9 @@ public:
   hook_guard &operator=(const hook_guard &) = delete;
 };
 
+std::filesystem::path audit_test_directory;
+std::filesystem::path test_audit_directory() { return audit_test_directory; }
+
 bool fail_random(std::span<std::byte>) noexcept { return false; }
 
 BOOL WINAPI fail_flush(HANDLE) {
@@ -87,30 +98,28 @@ BOOL WINAPI fail_flush(HANDLE) {
   return FALSE;
 }
 
-int recycle_empty_calls{};
 int recycle_scan_calls{};
+int recycle_query_calls{};
+int recycle_erase_calls{};
+bool recycle_global_query_requested{};
 
-HRESULT WINAPI fail_recycle_empty(HWND, LPCWSTR, DWORD) {
-  ++recycle_empty_calls;
-  return E_ACCESSDENIED;
-}
-
-HRESULT WINAPI count_recycle_empty(HWND, LPCWSTR, DWORD) {
-  ++recycle_empty_calls;
-  return S_OK;
-}
-
-HRESULT WINAPI query_recycle_empty(LPCWSTR, LPSHQUERYRBINFO info) {
+HRESULT WINAPI query_recycle_empty(LPCWSTR root, LPSHQUERYRBINFO info) {
+  ++recycle_query_calls;
+  recycle_global_query_requested |= root == nullptr;
   info->i64NumItems = 0;
   info->i64Size = 0;
   return S_OK;
 }
 
-HRESULT WINAPI fail_recycle_query(LPCWSTR, LPSHQUERYRBINFO) {
+HRESULT WINAPI fail_recycle_query(LPCWSTR root, LPSHQUERYRBINFO) {
+  ++recycle_query_calls;
+  recycle_global_query_requested |= root == nullptr;
   return E_FAIL;
 }
 
-HRESULT WINAPI query_recycle_with_items(LPCWSTR, LPSHQUERYRBINFO info) {
+HRESULT WINAPI query_recycle_with_items(LPCWSTR root, LPSHQUERYRBINFO info) {
+  ++recycle_query_calls;
+  recycle_global_query_requested |= root == nullptr;
   info->i64NumItems = 1;
   info->i64Size = 1;
   return S_OK;
@@ -120,15 +129,29 @@ oblivion::recycle_bin_scan_result incomplete_recycle_scan() {
   return {{}, false, ERROR_ACCESS_DENIED};
 }
 
-oblivion::recycle_bin_scan_result empty_recycle_scan() { return {}; }
+oblivion::recycle_bin_scan_result empty_recycle_scan() {
+  oblivion::recycle_bin_scan_result result;
+  result.scanned_roots.emplace_back(L"C:\\");
+  result.scanned_volumes.emplace_back(L"\\\\?\\Volume{OBLIVION-TEST}\\");
+  return result;
+}
 
 oblivion::recycle_bin_scan_result one_recycle_item_scan() {
-  return {{std::filesystem::temp_directory_path()}, true, 0};
+  auto result = empty_recycle_scan();
+  result.items.push_back(std::filesystem::temp_directory_path());
+  return result;
+}
+
+oblivion::recycle_bin_scan_result two_recycle_items_scan() {
+  auto result = empty_recycle_scan();
+  result.items.push_back(std::filesystem::temp_directory_path());
+  result.items.push_back(std::filesystem::temp_directory_path());
+  return result;
 }
 
 oblivion::recycle_bin_scan_result changed_recycle_scan() {
   ++recycle_scan_calls;
-  return recycle_scan_calls == 1 ? oblivion::recycle_bin_scan_result{}
+  return recycle_scan_calls == 1 ? empty_recycle_scan()
                                  : one_recycle_item_scan();
 }
 
@@ -137,7 +160,28 @@ oblivion::erase_result cancelled_recycle_erase(const std::filesystem::path &,
                                                const oblivion::progress_callback &) {
   oblivion::erase_result result;
   result.cancelled = true;
+  result.win32_error = ERROR_CANCELLED;
+  result.files_deleted = 2;
+  result.directories_deleted = 3;
+  result.bytes_written = 4;
+  result.alternate_streams_overwritten = 5;
+  result.reparse_points_removed = 6;
+  result.hardlinks_blocked = 7;
+  result.warnings.emplace_back(L"Testwarnung");
+  result.lock_owners.push_back({42, L"Testprozess", L"Testdienst"});
   result.message = L"Testabbruch";
+  return result;
+}
+
+oblivion::erase_result throwing_second_recycle_erase(
+    const std::filesystem::path &, const oblivion::erase_options &,
+    const oblivion::progress_callback &) {
+  if (++recycle_erase_calls == 2)
+    throw std::runtime_error("simulated recycle erase failure");
+  oblivion::erase_result result;
+  result.success = true;
+  result.files_deleted = 1;
+  result.bytes_written = 32;
   return result;
 }
 
@@ -321,6 +365,27 @@ bool test_reparse_point(const std::filesystem::path &root) {
       "Engine ist dem Reparse Point gefolgt und hat das Ziel verändert.");
 }
 
+bool test_reparse_ancestor_blocked(const std::filesystem::path &root) {
+  oblivion::erase_engine engine;
+  oblivion::erase_options options;
+  options.rename_before_delete = false;
+  const auto target = root / L"ancestor-target";
+  const auto victim = target / L"victim.bin";
+  const auto link = root / L"ancestor-link";
+  std::filesystem::create_directories(target);
+  if (!require(write_bytes(victim, 128, 0x5a),
+               "Reparse-Vorfahren-Testdatei konnte nicht geschrieben werden."))
+    return false;
+  if (!CreateSymbolicLinkW(link.c_str(), target.c_str(),
+                           SYMBOLIC_LINK_FLAG_DIRECTORY |
+                               SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+    return require(false,
+                   "Reparse-Vorfahre konnte nicht für den Test erzeugt werden.");
+  const auto result = engine.erase(link / L"victim.bin", options);
+  return require(!result.success && std::filesystem::exists(victim),
+                 "Engine folgte einem Reparse-Vorfahren bis zum Löschziel.");
+}
+
 bool test_locked_file(const std::filesystem::path &root) {
   oblivion::erase_engine engine;
   oblivion::erase_options options;
@@ -383,10 +448,55 @@ bool test_analysis_volume_grouping() {
       report.find(L"Gerät: Oblivion Test Device F", first_f + 1) ==
           std::wstring::npos;
 
-  return require(report.find(L"Datenträger: 2") != std::wstring::npos &&
-                     report.find(L"F:\\ · 2 Ziele") != std::wstring::npos &&
-                     report.find(L"G:\\") != std::wstring::npos && f_once,
-                 "Analyse gruppiert identische Volumes nicht korrekt.");
+  if (!require(report.find(L"Datenträger: 2") != std::wstring::npos &&
+                   report.find(L"F:\\ · 2 Ziele") != std::wstring::npos &&
+                   report.find(L"G:\\") != std::wstring::npos && f_once,
+               "Analyse gruppiert identische Volumes nicht korrekt."))
+    return false;
+  oblivion::file_analysis incomplete;
+  incomplete.inaccessible_entries = 1;
+  if (!require(oblivion::requires_typed_confirmation(incomplete),
+               "Unvollständige Voranalyse erzwingt keine starke "
+               "Löschbestätigung."))
+    return false;
+  oblivion::erase_options dangerous;
+  dangerous.hardlinks = oblivion::hardlink_policy::overwrite_shared_content;
+  if (!require(oblivion::requires_hardlink_confirmation(dangerous),
+               "Shared-Hardlink-Overwrite erfordert ohne Analysefund keine "
+               "besondere Bestätigung."))
+    return false;
+  dangerous.mode = oblivion::erase_mode::gutmann;
+  dangerous.verify = false;
+  dangerous.erase_alternate_streams = false;
+  dangerous.rename_before_delete = false;
+  dangerous.rename_rounds = 17;
+  const auto elevation = oblivion::build_elevation_arguments(
+      dangerous, {L"C:\\retry-only.bin"});
+  const auto has = [&elevation](const std::wstring_view option) {
+    return std::ranges::find(elevation, option) != elevation.end();
+  };
+  return require(has(L"--gutmann") && has(L"--no-verify") &&
+                     has(L"--no-ads") && has(L"--no-rename") &&
+                     has(L"--rename-rounds") && has(L"17") &&
+                     has(L"--hardlink-overwrite-shared") &&
+                     has(L"C:\\retry-only.bin"),
+                 "UAC-Retry serialisiert Löschoptionen oder Restziele nicht "
+                 "vollständig.");
+}
+
+bool test_analysis_resource_limit(const std::filesystem::path &root) {
+  hook_guard guard;
+  const auto directory = root / L"analysis-limit";
+  std::filesystem::create_directory(directory);
+  if (!write_bytes(directory / L"one.bin", 1, 1) ||
+      !write_bytes(directory / L"two.bin", 1, 2))
+    return require(false, "Analyse-Limit-Test konnte nicht vorbereitet werden.");
+  oblivion::testing::hooks().analysis_max_entries = 2;
+  const auto analysis = oblivion::analyzer{}.analyze(directory);
+  return require(analysis.inaccessible_entries != 0 &&
+                     oblivion::requires_typed_confirmation(analysis),
+                 "Übergroße Voranalyse wird nicht begrenzt und als "
+                 "unvollständig markiert.");
 }
 
 bool test_secure_memory() {
@@ -403,7 +513,7 @@ bool test_secure_memory() {
                  "Sicherer Arbeitspuffer wurde nicht vollständig bereinigt.");
 }
 
-bool test_engine_boundary_guard() {
+bool test_engine_boundary_guard(const std::filesystem::path &root) {
   std::vector<wchar_t> windows_directory(32768);
   const UINT length = GetWindowsDirectoryW(
       windows_directory.data(), static_cast<UINT>(windows_directory.size()));
@@ -412,12 +522,146 @@ bool test_engine_boundary_guard() {
                "werden."))
     return false;
   const std::filesystem::path protected_target{windows_directory.data()};
+  environment_variable_guard spoofed_system_root(
+      L"SystemRoot", L"Z:\\attacker-controlled-system-root");
+  if (!require(spoofed_system_root.changed(),
+               "SystemRoot konnte für den Schutzpfadtest nicht manipuliert "
+               "werden."))
+    return false;
   oblivion::erase_engine engine;
   const auto result = engine.erase(protected_target, {});
-  return require(!result.success && result.win32_error == ERROR_ACCESS_DENIED &&
-                     std::filesystem::exists(protected_target),
-                 "Direkter Engine-Aufruf hat einen geschützten Systempfad "
-                 "nicht blockiert.");
+  if (!require(!result.success && result.win32_error == ERROR_ACCESS_DENIED &&
+                   std::filesystem::exists(protected_target),
+               "Direkter Engine-Aufruf hat einen geschützten Systempfad bei "
+               "manipulierter Umgebung nicht blockiert."))
+    return false;
+  PWSTR program_files = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles,
+                                  KF_FLAG_DONT_VERIFY, nullptr,
+                                  &program_files)) ||
+      program_files == nullptr)
+    return require(false, "Program Files konnte nicht bestimmt werden.");
+  std::vector<wchar_t> short_path(32768);
+  const DWORD short_length = GetShortPathNameW(
+      program_files, short_path.data(), static_cast<DWORD>(short_path.size()));
+  CoTaskMemFree(program_files);
+  if (short_length != 0 &&
+      static_cast<std::size_t>(short_length) < short_path.size()) {
+    const std::filesystem::path alias{short_path.data()};
+    const auto alias_result = engine.erase(alias, {});
+    if (!require(!alias_result.success &&
+                     alias_result.win32_error == ERROR_ACCESS_DENIED &&
+                     std::filesystem::exists(alias),
+                 "Kanonischer Schutzpfadvergleich blockiert einen Windows-"
+                 "Kurznamenalias nicht."))
+      return false;
+  }
+  PWSTR public_profile = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_Public, KF_FLAG_DONT_VERIFY, nullptr,
+                                  &public_profile)) ||
+      public_profile == nullptr)
+    return require(false,
+                   "Öffentliches Benutzerprofil konnte nicht bestimmt werden.");
+  const std::filesystem::path public_path{public_profile};
+  CoTaskMemFree(public_profile);
+  const auto public_validation =
+      oblivion::path_validator{}.validate(public_path);
+  if (!require(!public_validation.allowed,
+               "Direkte Benutzerprofilwurzel außerhalb der aktuellen "
+                "Profilprüfung wurde nicht blockiert."))
+    return false;
+  PWSTR public_documents = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_PublicDocuments,
+                                  KF_FLAG_DONT_VERIFY, nullptr,
+                                  &public_documents)) ||
+      public_documents == nullptr)
+    return require(false,
+                   "Öffentliche Dokumente konnten nicht bestimmt werden.");
+  const std::filesystem::path public_documents_path{public_documents};
+  CoTaskMemFree(public_documents);
+  const auto public_documents_validation =
+      oblivion::path_validator{}.validate(public_documents_path);
+  if (!require(!public_documents_validation.allowed,
+               "Unterpfad eines fremden/öffentlichen Profilbaums wurde nicht "
+               "blockiert."))
+    return false;
+
+  const auto option_target = root / L"invalid-options.bin";
+  if (!require(write_bytes(option_target, 1024, 0x5a),
+               "Testdatei für Engine-Optionsgrenze konnte nicht erstellt "
+               "werden."))
+    return false;
+  oblivion::erase_options invalid;
+  invalid.hardlinks = static_cast<oblivion::hardlink_policy>(999u);
+  const auto invalid_policy = engine.erase(option_target, invalid);
+  if (!require(!invalid_policy.success &&
+                   invalid_policy.win32_error == ERROR_INVALID_PARAMETER &&
+                   std::filesystem::exists(option_target),
+               "Ungültige Hardlink-Policy erreicht den Löschpfad."))
+    return false;
+  invalid = {};
+  invalid.rename_rounds = 33u;
+  const auto invalid_rounds = engine.erase(option_target, invalid);
+  if (!require(!invalid_rounds.success &&
+                   invalid_rounds.win32_error == ERROR_INVALID_PARAMETER &&
+                   std::filesystem::exists(option_target),
+               "Unbeschränkte Rename-Runden erreichen den Löschpfad."))
+    return false;
+  invalid = {};
+  invalid.buffer_size = 0u;
+  const auto invalid_buffer = engine.erase(option_target, invalid);
+  return require(!invalid_buffer.success &&
+                     invalid_buffer.win32_error == ERROR_INVALID_PARAMETER &&
+                     std::filesystem::exists(option_target),
+                  "Ungültige Puffergröße erreicht den Löschpfad.");
+}
+
+bool test_callback_exception_preserves_partial_result(
+    const std::filesystem::path &root) {
+  const auto directory = root / L"callback-exception";
+  std::filesystem::create_directory(directory);
+  if (!write_bytes(directory / L"first.bin", 1024, 0x31) ||
+      !write_bytes(directory / L"second.bin", 1024, 0x32))
+    return require(false, "Callback-Ausnahmetest konnte nicht vorbereitet werden.");
+
+  oblivion::erase_options options;
+  options.mode = oblivion::erase_mode::fast;
+  options.verify = false;
+  options.rename_before_delete = false;
+  unsigned callbacks = 0;
+  const auto result = oblivion::erase_engine{}.erase(
+      directory, options, [&](const oblivion::progress_info &) {
+        if (++callbacks == 2)
+          throw std::runtime_error("simulated callback failure");
+        return true;
+      });
+  std::error_code error;
+  const auto remaining = static_cast<std::size_t>(
+      std::distance(std::filesystem::directory_iterator(directory, error),
+                    std::filesystem::directory_iterator{}));
+  return require(!error && !result.success && result.cancelled &&
+                     result.files_deleted == 1 && remaining == 1,
+                 "Callback-Ausnahme verliert bereits ausgeführte Teilergebnisse "
+                 "oder löscht nach dem Fehler weiter.");
+}
+
+bool test_cancellation_exception_fails_closed(
+    const std::filesystem::path &root) {
+  const auto file = root / L"cancellation-exception.bin";
+  if (!write_bytes(file, 1024, 0x41))
+    return require(false,
+                   "Abbruch-Ausnahmetest konnte nicht vorbereitet werden.");
+  oblivion::prepared_operation prepared;
+  prepared.valid = true;
+  prepared.targets.push_back(file);
+  const auto result = oblivion::execute_prepared_operation(
+      prepared, {}, {}, []() -> bool {
+        throw std::runtime_error("simulated cancellation failure");
+      });
+  return require(result.cancelled && result.exit_code == 130 &&
+                     std::filesystem::exists(file),
+                 "Ausnahme im Abbruch-Callback wurde nicht fail-closed als "
+                 "Abbruch behandelt.");
 }
 
 bool test_runtime_hardening() {
@@ -429,13 +673,38 @@ bool test_runtime_hardening() {
 
 bool test_wipe_failure_paths(const std::filesystem::path &root) {
   oblivion::erase_options options;
+  {
+    auto invalid = options;
+    invalid.mode = static_cast<oblivion::erase_mode>(999);
+    const auto result = oblivion::wipe_volume_free_space(root, invalid, {});
+    if (!require(!result.success &&
+                     result.win32_error == ERROR_INVALID_PARAMETER,
+                 "Ungültiger Freispeicher-Modus wird nicht vor jeder "
+                 "Volume-Operation abgewiesen."))
+      return false;
+  }
   options.mode = oblivion::erase_mode::standard;
+  const auto no_wipe_artifacts = [&root] {
+    std::error_code error;
+    std::filesystem::directory_iterator it(root, error), end;
+    if (error)
+      return false;
+    while (it != end) {
+      if (it->path().filename().wstring().starts_with(L".oblivion_wipetmp_"))
+        return false;
+      it.increment(error);
+      if (error)
+        return false;
+    }
+    return true;
+  };
   {
     hook_guard guard;
     oblivion::testing::hooks().random = fail_random;
     const auto result = oblivion::wipe_volume_free_space(root, options, {});
-    if (!require(!result.success && result.win32_error == ERROR_GEN_FAILURE,
-                 "CSPRNG-Fehler beendet Freispeicher-Bereinigung nicht fail-closed."))
+    if (!require(!result.success && result.win32_error == ERROR_GEN_FAILURE &&
+                     no_wipe_artifacts(),
+                  "CSPRNG-Fehler beendet Freispeicher-Bereinigung nicht fail-closed."))
       return false;
   }
   {
@@ -444,8 +713,24 @@ bool test_wipe_failure_paths(const std::filesystem::path &root) {
     oblivion::testing::hooks().wipe_max_chunk_bytes = 4096;
     oblivion::testing::hooks().flush = fail_flush;
     const auto result = oblivion::wipe_volume_free_space(root, options, {});
-    if (!require(!result.success && result.win32_error == ERROR_WRITE_FAULT,
-                 "Flush-Fehler beendet Freispeicher-Bereinigung nicht fail-closed."))
+    if (!require(!result.success && result.win32_error == ERROR_WRITE_FAULT &&
+                     no_wipe_artifacts(),
+                  "Flush-Fehler beendet Freispeicher-Bereinigung nicht fail-closed."))
+      return false;
+  }
+  {
+    hook_guard guard;
+    options.mode = oblivion::erase_mode::nist_800_88;
+    oblivion::testing::hooks().wipe_max_chunk_bytes = 4096;
+    const auto result = oblivion::wipe_volume_free_space(
+        root, options, [](const oblivion::progress_info &) -> bool {
+          throw std::runtime_error("simulated wipe callback failure");
+        });
+    if (!require(!result.success &&
+                     result.win32_error == ERROR_UNHANDLED_EXCEPTION &&
+                     result.bytes_written == 4096 && no_wipe_artifacts(),
+                 "Callback-Ausnahme verliert Freispeicher-Teilergebnisse oder "
+                 "hinterlässt Bereinigungsartefakte."))
       return false;
   }
   return true;
@@ -455,64 +740,71 @@ bool test_recycle_bin_failure_paths() {
   oblivion::erase_options options;
   {
     hook_guard guard;
-    recycle_empty_calls = 0;
-    oblivion::testing::hooks().recycle_scan = incomplete_recycle_scan;
-    oblivion::testing::hooks().recycle_empty = count_recycle_empty;
-    const auto result = oblivion::secure_empty_recycle_bin(options, {});
-    if (!require(!result.success && result.win32_error == ERROR_ACCESS_DENIED &&
-                     recycle_empty_calls == 0,
-                 "Unvollständiger Papierkorb-Scan ruft die Shell-Bereinigung auf."))
+    recycle_scan_calls = 0;
+    auto invalid = options;
+    invalid.hardlinks = static_cast<oblivion::hardlink_policy>(999);
+    oblivion::testing::hooks().recycle_scan = changed_recycle_scan;
+    const auto result = oblivion::secure_empty_recycle_bin(invalid, {});
+    if (!require(!result.success &&
+                     result.win32_error == ERROR_INVALID_PARAMETER &&
+                     recycle_scan_calls == 0,
+                 "Ungültige Papierkorboptionen werden nicht vor der ersten "
+                 "Aufzählung abgewiesen."))
       return false;
   }
   {
     hook_guard guard;
-    recycle_empty_calls = 0;
+    recycle_query_calls = 0;
+    oblivion::testing::hooks().recycle_scan = incomplete_recycle_scan;
+    oblivion::testing::hooks().recycle_query = query_recycle_empty;
+    const auto result = oblivion::secure_empty_recycle_bin(options, {});
+    if (!require(!result.success && result.win32_error == ERROR_ACCESS_DENIED &&
+                     recycle_query_calls == 0,
+                 "Unvollständiger Papierkorb-Scan erreicht die Endzustandsabfrage."))
+      return false;
+  }
+  {
+    hook_guard guard;
+    recycle_query_calls = 0;
     recycle_scan_calls = 0;
     oblivion::testing::hooks().recycle_scan = changed_recycle_scan;
-    oblivion::testing::hooks().recycle_empty = count_recycle_empty;
+    oblivion::testing::hooks().recycle_query = query_recycle_empty;
     const auto result = oblivion::secure_empty_recycle_bin(options, {});
     if (!require(!result.success && result.win32_error == ERROR_DIR_NOT_EMPTY &&
-                     recycle_empty_calls == 0,
-                 "Neu erschienene Papierkorbobjekte werden von der Shell gelöscht."))
+                     recycle_query_calls == 0,
+                 "Neu erschienene Papierkorbobjekte erreichen die "
+                 "Endzustandsabfrage trotz abgebrochener Verarbeitung."))
       return false;
   }
   {
     hook_guard guard;
-    recycle_empty_calls = 0;
+    recycle_query_calls = 0;
     oblivion::testing::hooks().recycle_scan = one_recycle_item_scan;
     oblivion::testing::hooks().recycle_exists = inaccessible_recycle_item;
-    oblivion::testing::hooks().recycle_empty = count_recycle_empty;
+    oblivion::testing::hooks().recycle_query = query_recycle_empty;
     const auto result = oblivion::secure_empty_recycle_bin(options, {});
     if (!require(!result.success && result.win32_error == ERROR_ACCESS_DENIED &&
-                     recycle_empty_calls == 0,
+                     recycle_query_calls == 0,
                  "Fehler beim Prüfen eines Papierkorbobjekts ist nicht fail-closed."))
       return false;
   }
   {
     hook_guard guard;
-    recycle_empty_calls = 0;
+    recycle_query_calls = 0;
+    recycle_global_query_requested = false;
     oblivion::testing::hooks().recycle_scan = empty_recycle_scan;
-    oblivion::testing::hooks().recycle_empty = fail_recycle_empty;
-    const auto result = oblivion::secure_empty_recycle_bin(options, {});
-    if (!require(!result.success && result.win32_error == ERROR_ACCESS_DENIED &&
-                     recycle_empty_calls == 1,
-                 "Fehler von SHEmptyRecycleBinW wird nicht weitergegeben."))
-      return false;
-  }
-  {
-    hook_guard guard;
-    oblivion::testing::hooks().recycle_scan = empty_recycle_scan;
-    oblivion::testing::hooks().recycle_empty = count_recycle_empty;
     oblivion::testing::hooks().recycle_query = fail_recycle_query;
     const auto result = oblivion::secure_empty_recycle_bin(options, {});
-    if (!require(!result.success && result.win32_error == HRESULT_CODE(E_FAIL),
+    if (!require(!result.success && result.win32_error == HRESULT_CODE(E_FAIL) &&
+                     recycle_query_calls == 1 &&
+                     !recycle_global_query_requested,
                  "Unverifizierter Papierkorb-Endzustand wird als Erfolg gemeldet."))
       return false;
   }
   {
     hook_guard guard;
+    recycle_query_calls = 0;
     oblivion::testing::hooks().recycle_scan = empty_recycle_scan;
-    oblivion::testing::hooks().recycle_empty = count_recycle_empty;
     oblivion::testing::hooks().recycle_query = query_recycle_with_items;
     const auto result = oblivion::secure_empty_recycle_bin(options, {});
     if (!require(!result.success && result.win32_error == ERROR_DIR_NOT_EMPTY,
@@ -521,23 +813,50 @@ bool test_recycle_bin_failure_paths() {
   }
   {
     hook_guard guard;
+    recycle_query_calls = 0;
+    recycle_global_query_requested = false;
     oblivion::testing::hooks().recycle_scan = empty_recycle_scan;
-    oblivion::testing::hooks().recycle_empty = count_recycle_empty;
     oblivion::testing::hooks().recycle_query = query_recycle_empty;
     const auto result = oblivion::secure_empty_recycle_bin(options, {});
-    if (!require(result.success,
-                 "Verifizierter leerer Papierkorb wird nicht als Erfolg gemeldet."))
+    if (!require(result.success && recycle_query_calls == 1 &&
+                     !recycle_global_query_requested,
+                  "Verifizierter leerer Papierkorb wird nicht als Erfolg "
+                  "gemeldet oder global statt volumengebunden abgefragt."))
       return false;
   }
   {
     hook_guard guard;
-    recycle_empty_calls = 0;
+    recycle_query_calls = 0;
     oblivion::testing::hooks().recycle_scan = one_recycle_item_scan;
     oblivion::testing::hooks().recycle_erase = cancelled_recycle_erase;
-    oblivion::testing::hooks().recycle_empty = count_recycle_empty;
+    oblivion::testing::hooks().recycle_query = query_recycle_empty;
     const auto result = oblivion::secure_empty_recycle_bin(options, {});
-    if (!require(!result.success && result.cancelled && recycle_empty_calls == 0,
-                 "Abgebrochene Papierkorb-Operation ruft die Shell-Bereinigung auf."))
+    if (!require(!result.success && result.cancelled &&
+                     result.win32_error == ERROR_CANCELLED &&
+                     result.files_deleted == 2 &&
+                     result.directories_deleted == 3 &&
+                     result.bytes_written == 4 &&
+                     result.alternate_streams_overwritten == 5 &&
+                     result.reparse_points_removed == 6 &&
+                     result.hardlinks_blocked == 7 &&
+                     result.warnings.size() == 1 &&
+                     result.lock_owners.size() == 1 &&
+                     recycle_query_calls == 0,
+                 "Abgebrochene Papierkorb-Operation erreicht die "
+                 "Endzustandsabfrage oder verliert Teilergebnisse."))
+      return false;
+  }
+  {
+    hook_guard guard;
+    recycle_erase_calls = 0;
+    oblivion::testing::hooks().recycle_scan = two_recycle_items_scan;
+    oblivion::testing::hooks().recycle_erase = throwing_second_recycle_erase;
+    const auto result = oblivion::secure_empty_recycle_bin(options, {});
+    if (!require(!result.success &&
+                     result.win32_error == ERROR_UNHANDLED_EXCEPTION &&
+                     result.files_deleted == 1 && result.bytes_written == 32,
+                 "Papierkorb-Ausnahme verliert bereits ausgeführte "
+                 "Teilergebnisse."))
       return false;
   }
   return true;
@@ -562,10 +881,9 @@ bool test_unique_handle() {
 }
 
 bool test_private_audit(const std::filesystem::path &root) {
-  local_appdata_guard environment(root);
-  if (!require(environment.changed(),
-               "LOCALAPPDATA konnte für den Audit-Test nicht isoliert werden."))
-    return false;
+  hook_guard guard;
+  audit_test_directory = root;
+  oblivion::testing::hooks().audit_directory = test_audit_directory;
   oblivion::operation_audit audit;
   audit.operation_id = oblivion::create_operation_id();
   audit.target = root / L"streng-geheimer-dateiname.txt";
@@ -575,6 +893,17 @@ bool test_private_audit(const std::filesystem::path &root) {
   audit.storage.device_serial = L"geheime-seriennummer";
   audit.result.success = true;
   audit.result.message = L"geheime-diagnosemeldung";
+  const auto collision = root / L"exclusive-create-guard.log";
+  {
+    std::ofstream guard_file(collision, std::ios::binary | std::ios::trunc);
+    guard_file << "guard";
+  }
+  if (!require(!oblivion::write_new_audit_file(collision, "replacement") &&
+                   read_bytes(collision) ==
+                       std::vector<unsigned char>{'g', 'u', 'a', 'r', 'd'},
+               "Vorhandene Auditdatei wurde statt exklusiver Neuerstellung "
+               "überschrieben."))
+    return false;
   const auto file = oblivion::write_audit_record(audit);
   if (!require(!file.empty() && std::filesystem::exists(file),
                "Privater Auditdatensatz konnte nicht geschrieben werden."))
@@ -591,15 +920,56 @@ bool test_private_audit(const std::filesystem::path &root) {
     return false;
   const auto audit_directory = file.parent_path();
   if (!require(oblivion::verify_audit_chain(audit_directory),
-               "Vollständige Audit-Kette konnte nicht verifiziert werden."))
+                "Vollständige Audit-Kette konnte nicht verifiziert werden."))
+    return false;
+  const auto audit_files = [&audit_directory] {
+    std::vector<std::wstring> names;
+    for (const auto &entry : std::filesystem::directory_iterator(audit_directory))
+      names.push_back(entry.path().filename().wstring());
+    std::ranges::sort(names);
+    return names;
+  };
+  const auto files_before_rng_failure = audit_files();
+  auto failed_audit = audit;
+  failed_audit.operation_id = oblivion::create_operation_id();
+  oblivion::testing::hooks().random = fail_random;
+  const auto failed_file = oblivion::write_audit_record(failed_audit);
+  oblivion::testing::hooks().random = nullptr;
+  if (!require(failed_file.empty() &&
+                   audit_files() == files_before_rng_failure &&
+                   oblivion::verify_audit_chain(audit_directory),
+               "Audit-Versiegelungsfehler hinterlässt unversiegelte "
+               "Datensätze, Hashes oder HMAC-Sidecars."))
+    return false;
+  const auto head_file = audit_directory / L"chain.head";
+  const auto original_head = read_bytes(head_file);
+  {
+    std::ofstream append_head(head_file, std::ios::binary | std::ios::app);
+    append_head << '\n';
+  }
+  if (!require(!oblivion::verify_audit_chain(audit_directory),
+               "Zusätzliche Daten im Audit-Kettenkopf wurden akzeptiert."))
     return false;
   {
-    std::ofstream tamper_head(audit_directory / L"chain.head",
+    std::ofstream restore_head(head_file,
+                               std::ios::binary | std::ios::trunc);
+    restore_head.write(
+        reinterpret_cast<const char *>(original_head.data()),
+        static_cast<std::streamsize>(original_head.size()));
+  }
+  {
+    std::ofstream tamper_head(head_file,
                               std::ios::binary | std::ios::trunc);
     tamper_head << std::string(64, '0') << '\n';
   }
   if (!require(!oblivion::verify_audit_chain(audit_directory),
                "Manipulierter Audit-Kettenkopf wurde nicht erkannt."))
+    return false;
+  auto rejected_audit = audit;
+  rejected_audit.operation_id = oblivion::create_operation_id();
+  if (!require(oblivion::write_audit_record(rejected_audit).empty(),
+               "Neuer Auditdatensatz wurde trotz beschädigtem Kettenkopf "
+               "als erfolgreich versiegelt."))
     return false;
   std::ifstream input(file, std::ios::binary);
   const std::string content{std::istreambuf_iterator<char>(input),
@@ -612,39 +982,118 @@ bool test_private_audit(const std::filesystem::path &root) {
   std::ofstream tamper(file, std::ios::binary | std::ios::app);
   tamper << 'X';
   tamper.close();
-  return require(!oblivion::verify_audit_file(file),
-                 "Manipulierter Auditdatensatz wurde nicht erkannt.");
+  if (!require(!oblivion::verify_audit_file(file),
+               "Manipulierter Auditdatensatz wurde nicht erkannt."))
+    return false;
+  const auto key_file = audit_directory / L"audit.key.dpapi";
+  {
+    oblivion::unique_win_handle corrupt_key{CreateFileW(
+        key_file.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr)};
+    constexpr char replacement[] = "corrupt";
+    DWORD written = 0;
+    if (!require(corrupt_key &&
+                     WriteFile(corrupt_key.get(), replacement,
+                               static_cast<DWORD>(sizeof(replacement) - 1u),
+                               &written, nullptr) != FALSE &&
+                     written == sizeof(replacement) - 1u &&
+                     SetEndOfFile(corrupt_key.get()) != FALSE &&
+                     FlushFileBuffers(corrupt_key.get()) != FALSE,
+                 "Audit-Schlüssel konnte für den Korruptionstest nicht "
+                 "überschrieben werden."))
+      return false;
+  }
+  if (!require(!oblivion::verify_audit_file(second_file),
+               "Beschädigter Audit-Schlüssel wurde nicht fail-closed "
+               "abgewiesen."))
+    return false;
+  const auto key_after_failure = read_bytes(key_file);
+  return require(
+      std::string{key_after_failure.begin(), key_after_failure.end()} ==
+          "corrupt",
+      "Beschädigter Audit-Schlüssel wurde unbemerkt ersetzt und die Historie "
+      "dadurch entwertet.");
 }
 
 bool test_certificate_html_escaping(const std::filesystem::path &root) {
-  local_appdata_guard environment(root);
-  if (!require(environment.changed(),
-               "LOCALAPPDATA konnte für den Zertifikat-Test nicht isoliert werden."))
-    return false;
+  hook_guard guard;
+  audit_test_directory = root;
+  oblivion::testing::hooks().audit_directory = test_audit_directory;
   const auto audit_file = root / L"untrusted-audit.log";
   const auto certificate = root / L"certificate.html";
   {
     std::ofstream audit(audit_file, std::ios::binary | std::ios::trunc);
     audit << "OBLIVION AUDIT\nOperationID: <script>alert(1)</script>\n"
-             "Media: HDD & SSD\n";
+             "Media: HDD & SSD\nFiles: 999\nDirectories: 888\n"
+             "LogicalBytes: 777\nSuccess: false\nCancelled: true\n"
+             "Win32Error: 5\nBytesWritten: 123\nFilesDeleted: 2\n"
+             "DirectoriesDeleted: 1\n";
+    std::ofstream forged_hash(audit_file.wstring() + L".sha256",
+                              std::ios::binary | std::ios::trunc);
+    forged_hash << "forged-sidecar-value";
   }
   if (!require(oblivion::generate_certificate_from_audit(audit_file, certificate),
-               "Zertifikat aus Test-Audit konnte nicht erstellt werden."))
+                "Zertifikat aus Test-Audit konnte nicht erstellt werden."))
+    return false;
+  const auto audit_before_self_export = read_bytes(audit_file);
+  if (!require(
+          !oblivion::generate_certificate_from_audit(audit_file, audit_file) &&
+              read_bytes(audit_file) == audit_before_self_export,
+          "Zertifikatexport durfte die Audit-Eingabedatei nicht überschreiben."))
+    return false;
+  const auto certificate_before_collision = read_bytes(certificate);
+  if (!require(
+          !oblivion::generate_certificate_from_audit(audit_file, certificate) &&
+              read_bytes(certificate) == certificate_before_collision,
+          "Vorhandenes Zertifikat wurde statt exklusiver Neuerstellung "
+          "überschrieben."))
     return false;
   const auto html = read_bytes(certificate);
   const std::string text{reinterpret_cast<const char *>(html.data()), html.size()};
-  return require(text.find("&lt;script&gt;alert(1)&lt;/script&gt;") !=
-                         std::string::npos &&
-                     text.find("<script>alert(1)</script>") == std::string::npos &&
-                     text.find("HDD &amp; SSD") != std::string::npos,
-                 "Zertifikat exportiert Auditwerte nicht HTML-escaped.");
+  if (!require(text.find("&lt;script&gt;alert(1)&lt;/script&gt;") !=
+                           std::string::npos &&
+                       text.find("<script>alert(1)</script>") ==
+                           std::string::npos &&
+                       text.find("HDD &amp; SSD") != std::string::npos &&
+                       text.find(">2</td>") != std::string::npos &&
+                       text.find(">1</td>") != std::string::npos &&
+                       text.find(">123 Bytes</td>") != std::string::npos &&
+                       text.find("Löschvorgang nicht als erfolgreich") !=
+                           std::string::npos &&
+                       text.find("forged-sidecar-value") == std::string::npos,
+                   "Zertifikat exportiert Auditwerte unsicher oder vertraut "
+                   "einem manipulierbaren SHA-256-Sidecar."))
+    return false;
+  const auto input_link = root / L"certificate-input-link";
+  if (!CreateSymbolicLinkW(input_link.c_str(), root.c_str(),
+                           SYMBOLIC_LINK_FLAG_DIRECTORY |
+                               SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+    return require(false,
+                   "Zertifikat-Eingabe-Symlink konnte nicht erzeugt werden.");
+  if (!require(!oblivion::generate_certificate_from_audit(
+                   input_link / audit_file.filename(),
+                   root / L"linked-input.html"),
+               "Zertifikatexport folgte einem Reparse-Eingabevorfahren."))
+    return false;
+  const auto output_target = root / L"certificate-output-target";
+  const auto output_link = root / L"certificate-output-link";
+  std::filesystem::create_directories(output_target);
+  if (!CreateSymbolicLinkW(output_link.c_str(), output_target.c_str(),
+                           SYMBOLIC_LINK_FLAG_DIRECTORY |
+                               SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+    return require(false,
+                   "Zertifikat-Ausgabe-Symlink konnte nicht erzeugt werden.");
+  return require(
+      !oblivion::generate_certificate_from_audit(
+          audit_file, output_link / L"redirected.html") &&
+          !std::filesystem::exists(output_target / L"redirected.html"),
+      "Zertifikatexport folgte einem Reparse-Ausgabevorfahren.");
 }
 
 bool test_audit_input_limits(const std::filesystem::path &root) {
-  local_appdata_guard environment(root);
-  if (!require(environment.changed(),
-               "LOCALAPPDATA konnte für den Größenlimit-Test nicht isoliert werden."))
-    return false;
+  hook_guard guard;
+  audit_test_directory = root;
+  oblivion::testing::hooks().audit_directory = test_audit_directory;
   const auto oversized = root / L"oversized-audit.log";
   {
     std::ofstream output(oversized, std::ios::binary | std::ios::trunc);
@@ -672,38 +1121,70 @@ bool test_local_dll_preloading_blocked() {
 int wmain() {
   try {
     test_directory directory;
-    if (!test_hardlinks(directory.path()))
+    const auto run = [](const char *name, const auto &test) {
+      std::cerr << "[ RUN      ] " << name << '\n';
+      const bool passed = test();
+      if (passed)
+        std::cerr << "[       OK ] " << name << '\n';
+      return passed;
+    };
+    if (!run("hardlinks", [&] { return test_hardlinks(directory.path()); }))
       return 1;
-    if (!test_ads(directory.path()))
+    if (!run("ads", [&] { return test_ads(directory.path()); }))
       return 2;
-    if (!test_reparse_point(directory.path()))
+    if (!run("reparse_point",
+             [&] { return test_reparse_point(directory.path()); }))
       return 3;
-    if (!test_locked_file(directory.path()))
+    if (!run("reparse_ancestor_blocked", [&] {
+          return test_reparse_ancestor_blocked(directory.path());
+        }))
       return 4;
-    if (!test_analysis_volume_grouping())
+    if (!run("locked_file",
+             [&] { return test_locked_file(directory.path()); }))
       return 5;
-    if (!test_secure_memory())
+    if (!run("analysis_volume_grouping", test_analysis_volume_grouping))
       return 6;
-    if (!test_engine_boundary_guard())
+    if (!run("analysis_resource_limit",
+             [&] { return test_analysis_resource_limit(directory.path()); }))
+      return 18;
+    if (!run("secure_memory", test_secure_memory))
       return 7;
-    if (!test_runtime_hardening())
+    if (!run("engine_boundary_guard",
+             [&] { return test_engine_boundary_guard(directory.path()); }))
       return 8;
-    if (!test_wipe_failure_paths(directory.path()))
+    if (!run("callback_exception_preserves_partial_result", [&] {
+          return test_callback_exception_preserves_partial_result(
+              directory.path());
+        }))
+      return 17;
+    if (!run("cancellation_exception_fails_closed", [&] {
+          return test_cancellation_exception_fails_closed(directory.path());
+        }))
+      return 19;
+    if (!run("runtime_hardening", test_runtime_hardening))
       return 9;
-    if (!test_recycle_bin_failure_paths())
+    if (!run("wipe_failure_paths",
+             [&] { return test_wipe_failure_paths(directory.path()); }))
       return 10;
-    if (!test_unique_handle())
+    if (!run("recycle_bin_failure_paths", test_recycle_bin_failure_paths))
       return 11;
-    if (!test_private_audit(directory.path()))
+    if (!run("unique_handle", test_unique_handle))
       return 12;
-    if (!test_certificate_html_escaping(directory.path()))
+    if (!run("private_audit",
+             [&] { return test_private_audit(directory.path()); }))
       return 13;
-    if (!test_audit_input_limits(directory.path()))
+    if (!run("certificate_html_escaping", [&] {
+          return test_certificate_html_escaping(directory.path());
+        }))
       return 14;
-    if (!test_local_dll_preloading_blocked())
+    if (!run("audit_input_limits",
+             [&] { return test_audit_input_limits(directory.path()); }))
       return 15;
+    if (!run("local_dll_preloading_blocked",
+             test_local_dll_preloading_blocked))
+      return 16;
     std::cout << "Engine-Self-Test erfolgreich: Hardlinks, ADS, Reparse "
-                 "Points, Locked Files, Volume-Gruppierung, sichere "
+                  "Points/Vorfahren, Locked Files, Volume-Gruppierung, sichere "
                  "Arbeitspuffer, Engine-Grenzschutz, Prozesshärtung, "
                  "CSPRNG-/Flush-Fehlerpfade, Papierkorb-Abbruch und "
                  "RAII-Handles, privater HMAC-Audit einschließlich "

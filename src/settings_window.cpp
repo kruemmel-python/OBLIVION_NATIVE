@@ -68,7 +68,7 @@ bool read(HWND h, st &s) {
                       : hardlink_policy::block;
   return true;
 }
-LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) noexcept try {
   auto *s = reinterpret_cast<st *>(GetWindowLongPtrW(h, GWLP_USERDATA));
   switch (m) {
   case WM_NCCREATE: {
@@ -204,6 +204,17 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return 0;
   }
   return DefWindowProcW(h, m, w, l);
+} catch (...) {
+  auto *failed =
+      reinterpret_cast<st *>(GetWindowLongPtrW(h, GWLP_USERDATA));
+  if (failed) {
+    failed->saved = false;
+    failed->done = true;
+  }
+  SetWindowLongPtrW(h, GWLP_USERDATA, 0);
+  if (IsWindow(h))
+    DestroyWindow(h);
+  return 0;
 }
 ATOM reg() {
   constexpr wchar_t n[] = L"OblivionSettingsV2";
@@ -233,16 +244,32 @@ bool show_settings_window(HWND owner) {
     EnableWindow(owner, FALSE);
   ShowWindow(h, SW_SHOW);
   MSG msg{};
-  while (!s.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+  bool repost_quit = false;
+  int quit_code = 0;
+  while (!s.done) {
+    const BOOL message_result = GetMessageW(&msg, nullptr, 0, 0);
+    if (message_result <= 0) {
+      if (message_result == 0) {
+        repost_quit = true;
+        quit_code = static_cast<int>(msg.wParam);
+      }
+      break;
+    }
     if (!IsDialogMessageW(h, &msg)) {
       TranslateMessage(&msg);
       DispatchMessageW(&msg);
     }
   }
+  if (IsWindow(h)) {
+    s.done = true;
+    DestroyWindow(h);
+  }
   if (owner) {
     EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
   }
+  if (repost_quit)
+    PostQuitMessage(quit_code);
   return s.saved;
 }
 } // namespace oblivion

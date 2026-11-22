@@ -25,7 +25,7 @@ public:
     return size_ == 0 || data_ != nullptr;
   }
   [[nodiscard]] std::span<std::byte> bytes() noexcept {
-    return {data_, size_};
+    return {data_, data_ != nullptr ? size_ : 0u};
   }
   void clear() noexcept;
 

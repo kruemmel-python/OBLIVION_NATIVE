@@ -1,11 +1,16 @@
 $ErrorActionPreference = 'Stop'
-$Root = Join-Path $env:TEMP 'OBLIVION_SAFE_TEST'
-$External = Join-Path $env:TEMP 'OBLIVION_EXTERNAL_GUARD'
-Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $External -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $Root | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $Root 'sub') | Out-Null
-New-Item -ItemType Directory -Path $External | Out-Null
+$RunId = [Guid]::NewGuid().ToString('N')
+$TempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$Root = Join-Path $TempRoot "OBLIVION_SAFE_TEST_$RunId"
+$External = Join-Path $TempRoot "OBLIVION_EXTERNAL_GUARD_$RunId"
+New-Item -ItemType Directory -Path $Root -ErrorAction Stop | Out-Null
+try {
+    New-Item -ItemType Directory -Path (Join-Path $Root 'sub') -ErrorAction Stop | Out-Null
+    New-Item -ItemType Directory -Path $External -ErrorAction Stop | Out-Null
+} catch {
+    Write-Error "Testbaum konnte nicht vollständig angelegt werden. Bereits erzeugte Pfade werden aus Sicherheitsgründen nicht rekursiv automatisch entfernt: $_"
+    throw
+}
 Set-Content (Join-Path $Root 'normal.txt') 'OBLIVION normal test data'
 Set-Content (Join-Path $Root 'sub\nested.txt') 'OBLIVION nested test data'
 Set-Content (Join-Path $External 'DO_NOT_DELETE.txt') 'Junction guard'
@@ -18,3 +23,4 @@ Write-Host "Testziel: $Root" -ForegroundColor Cyan
 Write-Host "Guard:     $External" -ForegroundColor Cyan
 Write-Host ".\dist\OblivionCLI.exe --analyze `"$Root`""
 Write-Host "Für vollständigen Löschtest wegen Hardlinks: .\dist\OblivionCLI.exe --standard --hardlink-delete-name `"$Root`"" -ForegroundColor Yellow
+Write-Host ".\tests\VERIFY_AFTER_ERASE.ps1 -Root `"$Root`" -External `"$External`""

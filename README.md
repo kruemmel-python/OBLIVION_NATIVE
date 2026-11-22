@@ -1,4 +1,4 @@
-# OBLIVION Native 2.1
+# OBLIVION Native 2.1.2
 
 Native C++20/Win32-Neuentwicklung des OBLIVION-Löschwerkzeugs mit vollständigem Desktop-Kontrollzentrum, Explorer-Integration, Compliance-Presets, Audit-Zertifikaten und separater Device-Sanitize-Domäne.
 
@@ -28,6 +28,8 @@ GUI und CLI verwenden dieselbe C++-Engine (`oblivion_core`).
 - Dry-Run mit Dateien, Ordnern, Bytes, ADS, Hardlinks, Reparse Points, Sparse, NTFS-Komprimierung, EFS, Read-only, nicht zugreifbaren Einträgen
 - HDD/SSD/NVMe, TRIM, Dateisystem, Gerät, Bus, PhysicalDrive, USN-Journal und Shadow-Copy-Hinweise
 - Persistente Optionen unter `HKCU\Software\Oblivion`
+- Erzwingbare Maschinen-/Benutzer-GPOs für Löschprofil, Readback-Verifikation
+  und die Sperre von Shared-Hardlink-Overwrite
 - Hardlink-Strategien: blockieren / nur Linknamen löschen / Shared Content nach zusätzlicher Freigabe
 - vollständige Schutzpfadprüfung aller ermittelbaren Hardlink-Namen vor Shared-Overwrite
 - ADS-Überschreibung vor dem Hauptdatenstrom
@@ -42,7 +44,8 @@ GUI und CLI verwenden dieselbe C++-Engine (`oblivion_core`).
   dynamischer Code, strikte Handle-Prüfung, gesperrte Legacy Extension Points,
   unsichere Images und nicht von Microsoft signierte nachgeladene DLLs
 - Windows Restart Manager für Lock-Owner-Diagnose
-- UAC-Neustart nur nach `ERROR_ACCESS_DENIED`
+- UAC-Neustart nur nach `ERROR_ACCESS_DENIED` und ausschließlich aus einer
+  gegen Binary-Planting gesperrten Installation unter `Program Files`
 - Audit 3 mit Operation UUID, pseudonymisierten HMAC-Referenzen,
   DPAPI-geschütztem lokalem Schlüssel, linearer HMAC-Kette und
   `.sha256`-Sidecar
@@ -107,6 +110,23 @@ Zusätzliche Texteingabe `OBLIVION` ab:
 - mehr als 100 Dateien oder
 - mindestens 1 GiB logische Daten oder
 - mehr als 50 Verzeichnisse
+- oder einer unvollständigen Voranalyse
+
+## Nichtinteraktive CLI-Bestätigung
+
+`--json` ist kein Bestätigungs-Bypass. Destruktive JSON-/Automationsaufrufe
+benötigen ein explizites Token:
+
+```powershell
+.\dist\OblivionCLI.exe --json --confirm-destruction OBLIVION "C:\Test\groß"
+.\dist\OblivionCLI.exe --empty-recycle-bin --json --confirm-destruction OBLIVION
+.\dist\OblivionCLI.exe --wipe-free-space "D:\" --json --confirm-destruction OBLIVION
+```
+
+Für kleine Dateioperationen lautet das von der Analyse erwartete Token `JA`,
+für große oder unvollständig analysierte Operationen `OBLIVION`. Die riskante
+Shared-Hardlink-Strategie verlangt zusätzlich
+`--confirm-hardlink HARDLINK`.
 
 ## Einstellungen
 
@@ -213,11 +233,16 @@ Erstellt ein vollständiges Windows-Setup (`.msi`) mit grafischem Installationsa
 .\BUILD_MSI.bat
 ```
 
-Ergebnis: `dist\OblivionSetup-2.1.1.msi`
+Ergebnis: `dist\OblivionSetup-2.1.2.msi`
 
 ### Variante B: Portables Kontextmenü (Benutzerebene)
 
 Direkte Registrierung der kompilierten Binaries für den aktuellen Benutzer ohne MSI:
+
+Portable Installationen in benutzerbeschreibbaren Verzeichnissen werden aus
+Sicherheitsgründen nicht automatisch per UAC neu gestartet. Für den
+automatischen erhöhten Retry ist die MSI-Installation unter `Program Files`
+erforderlich.
 
 ```powershell
 .\INSTALL_CONTEXT_MENU.bat

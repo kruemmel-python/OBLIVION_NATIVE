@@ -12,8 +12,10 @@ Aktueller Entwicklungsstand auf Basis von `OBLIVION_NATIVE` (C++20 / Win32 / CMa
 - [x] Laufwerks-Kontextmenü (*„Freien Speicherplatz mit Oblivion überschreiben“*) & Papierkorb-Kontextmenü (*„Papierkorb mit Oblivion sicher leeren“*)
 - [x] Mehrfachauswahl über nativen In-Memory-Batch-Broker
 - [x] Analyse/Dry-Run
+- [x] feste Analyse- und ADS-Ressourcenobergrenzen
 - [x] Gesamtfortschritt, Pass, Durchsatz, ETA, Abbruch
 - [x] ADS-Erkennung und -Überschreibung
+- [x] erneuter ADS-Mengen-/Größenvergleich vor dem Hauptdatenstrom
 - [x] Hardlink-Erkennung und drei Strategien
 - [x] Schutzpfadprüfung der Hardlink-Namensmenge vor Shared-Overwrite
 - [x] Reparse/Junction/Symlink ohne Traversierung
@@ -29,12 +31,15 @@ Aktueller Entwicklungsstand auf Basis von `OBLIVION_NATIVE` (C++20 / Win32 / CMa
 - [x] FAST / STANDARD / STRONG sowie Compliance-Presets (`DoD 5220.22-M`, `NIST SP 800-88`, `BSI IT-Grundschutz`, `Gutmann`)
 - [x] Freien Speicherplatz sicher überschreiben (`--wipe-free-space`) & Papierkorb sicher leeren (`--empty-recycle-bin`)
 - [x] HTML-Löschzertifikat-Export (`--export-certificate`)
-- [x] WiX-MSI-Installer (`BUILD_MSI.bat` -> `dist\OblivionSetup-2.1.1.msi`) inkl. Startmenü-Verknüpfung
+- [x] WiX-MSI-Installer (`BUILD_MSI.bat` -> `dist\OblivionSetup-2.1.2.msi`) inkl. Startmenü-Verknüpfung
 - [x] Zero-Readback und SHA-256-Readback des finalen Random-Passes
 - [x] isolierter, vor Freigabe sicher bereinigter Arbeitspuffer
 - [x] bestmöglicher `VirtualLock` des Arbeitspuffers gegen Paging
 - [x] harter Fehler bei RNG-, Pufferreservierungs- oder Flush-Fehlern
 - [x] Fail-closed-Schutzpfadprüfung direkt in `erase_engine::erase`
+- [x] Schutz des eigenen Audit-/Anwendungszustands unter `%LOCALAPPDATA%\Oblivion`
+- [x] absolute IPC-Nachrichtendeadline gegen partielle Slow-Clients
+- [x] Engine-Grenzprüfung für Enums, Rename-Runden und Puffergrößen
 - [x] native Prozesshärtung und read-only `--diagnostics`
 - [x] strikte Handle-Prüfung und Microsoft-Signaturpflicht für nachgeladene DLLs
 - [x] RAII-Handle-Besitz im kritischen Datei-Löschpfad
@@ -54,9 +59,10 @@ Der erste reale VS2022-Build hat drei Compilerprobleme offengelegt (COM-Export-B
 
 ## Verifiziert
 
-Der Quellstand wurde auf dem Windows-Zielrechner mit Visual Studio 2022 x64,
-Windows SDK und `/W4 /WX /permissive- /EHsc /utf-8` gebaut. Shell- und
-Engine-Selbsttest sind über CTest eingebunden.
+Version 2.1.1 wurde auf dem Windows-Zielrechner mit Visual Studio 2022 x64,
+Windows SDK und `/W4 /WX /permissive- /EHsc /utf-8` gebaut. Für 2.1.2 stehen
+der vollständige MSVC-Release-Build, CTest, MSI-Build und die gezielten
+Laufzeitprüfungen nach Abschluss der statischen Sicherheitsprüfung noch aus.
 
 ```powershell
 .\BUILD_WINDOWS.bat
